@@ -183,25 +183,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openEmbeddedWeTypeSettings(): Boolean {
-        val bridgePendingIntent = runCatching {
-            ModuleBridgeContract.createSettingsBridgePendingIntent(this)
-        }.getOrNull()
         val launchIntents = listOfNotNull(
             packageManager.getLaunchIntentForPackage("com.tencent.wetype")?.apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 putExtra(EXTRA_OPEN_WETYPE_EMBEDDED_SETTINGS, true)
-                bridgePendingIntent?.let {
-                    putExtra(ModuleBridgeContract.EXTRA_BRIDGE_PENDING_INTENT, it)
-                }
             },
             Intent(Intent.ACTION_MAIN).apply {
                 setPackage("com.tencent.wetype")
                 addCategory(Intent.CATEGORY_LAUNCHER)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 putExtra(EXTRA_OPEN_WETYPE_EMBEDDED_SETTINGS, true)
-                bridgePendingIntent?.let {
-                    putExtra(ModuleBridgeContract.EXTRA_BRIDGE_PENDING_INTENT, it)
-                }
             },
             Intent().apply {
                 component = ComponentName(
@@ -210,9 +201,6 @@ class MainActivity : ComponentActivity() {
                 )
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 putExtra(EXTRA_OPEN_WETYPE_EMBEDDED_SETTINGS, true)
-                bridgePendingIntent?.let {
-                    putExtra(ModuleBridgeContract.EXTRA_BRIDGE_PENDING_INTENT, it)
-                }
             }
         )
 

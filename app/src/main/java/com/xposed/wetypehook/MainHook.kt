@@ -279,18 +279,13 @@ class MainHook : XposedModule() {
     }
 
     private fun installWeTypeHooks(sourcePackage: String) {
-        if (frameworkProperties and XposedInterface.PROP_CAP_REMOTE != 0L) {
-            runCatching {
-                WeTypeSettings.bindRemotePreferences(
-                    getRemotePreferences(WeTypeSettings.PREF_GROUP)
-                )
-            }.onFailure { error ->
-                Log.e("Remote preferences are unavailable; WeType hooks use defaults")
-                Log.i(error)
-            }
-        } else {
-            Log.i("Remote preferences are unavailable; WeType hooks use defaults")
-        }
+        // Application.attach is not replayed when an already running process hot reloads.
+        val application = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull()
+        application?.let(WeTypeSettings::ensureHostSnapshot)
 
         HookEnvironment.withHookScope("wetype.activation") { hookActivationHeartbeat(sourcePackage) }
         HookEnvironment.withHookScope("wetype.font") { hookWeTypeFont() }
@@ -612,9 +607,9 @@ class MainHook : XposedModule() {
 
         findMethod("android.inputmethodservice.InputMethodService") {
             name == "onStartInputView" && parameterTypes.size == 2
-        }.hookAfter { param ->
-            val service = param.thisObject as? InputMethodService ?: return@hookAfter
-            if (service.packageName != sourcePackage) return@hookAfter
+        }.hookBefore { param ->
+            val service = param.thisObject as? InputMethodService ?: return@hookBefore
+            if (service.packageName != sourcePackage) return@hookBefore
             WeTypeSettings.ensureHostSnapshot(service)
             notifyActivationHeartbeat(service, sourcePackage)
         }

@@ -56,13 +56,15 @@ kotlin {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
     implementation("androidx.activity:activity-compose:1.13.0")
-    implementation("androidx.compose.foundation:foundation-android:1.11.4")
-    implementation("androidx.compose.ui:ui-android:1.11.4")
-    implementation("androidx.compose.ui:ui-graphics-android:1.11.4")
-    implementation("androidx.compose.ui:ui-text-android:1.11.4")
+    implementation("androidx.compose.foundation:foundation-android:1.12.1")
+    implementation("androidx.compose.ui:ui-android:1.12.1")
+    implementation("androidx.compose.ui:ui-graphics-android:1.12.1")
+    implementation("androidx.compose.ui:ui-text-android:1.12.1")
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-core-android:0.9.3")

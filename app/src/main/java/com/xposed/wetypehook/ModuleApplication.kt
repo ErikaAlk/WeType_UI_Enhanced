@@ -2,7 +2,6 @@ package com.xposed.wetypehook
 
 import android.app.Application
 import android.util.Log
-import com.xposed.wetypehook.wetype.settings.WeTypeSettings
 import io.github.libxposed.service.HookedTarget
 import io.github.libxposed.service.HotReloadResult
 import io.github.libxposed.service.XposedService
@@ -24,18 +23,10 @@ class ModuleApplication : Application(), XposedServiceHelper.OnServiceListener {
 
     override fun onServiceBind(service: XposedService) {
         xposedService = service
-        WeTypeSettings.unbindRemotePreferences()
         runCatching {
             if (service.apiVersion < XposedService.API_102) {
                 Log.w(TAG, "Framework service API ${service.apiVersion} does not support API 102")
                 return@runCatching
-            }
-
-            if (service.frameworkProperties and XposedService.PROP_CAP_REMOTE != 0L) {
-                WeTypeSettings.bindRemotePreferences(
-                    service.getRemotePreferences(WeTypeSettings.PREF_GROUP)
-                )
-                WeTypeSettings.synchronizeRemotePreferences(this)
             }
 
             val targets = service.runningTargets
@@ -51,7 +42,6 @@ class ModuleApplication : Application(), XposedServiceHelper.OnServiceListener {
     override fun onServiceDied(service: XposedService) {
         if (xposedService !== service) return
         xposedService = null
-        WeTypeSettings.unbindRemotePreferences()
     }
 
     private fun requestHotReload(service: XposedService, target: HookedTarget) {

@@ -16,7 +16,6 @@ import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentDialog
 import androidx.compose.ui.platform.ComposeView
-import com.xposed.wetypehook.wetype.settings.WeTypeSettings
 import com.xposed.wetypehook.xposed.Log
 import java.util.WeakHashMap
 import java.util.concurrent.CountDownLatch
@@ -29,9 +28,6 @@ private val moduleResourcesCache = HashMap<String, Resources>()
 object WeTypeHostLauncher {
     fun show(activity: Activity) {
         activeHostDialogs[activity]?.takeIf { it.isShowing }?.let { return }
-        WeTypeSettings.bindModuleBridgePendingIntent(
-            ModuleBridgeContract.settingsBridgePendingIntent(activity.intent)
-        )
 
         val moduleContext = runCatching {
             activity.createPackageContext(
@@ -53,7 +49,6 @@ object WeTypeHostLauncher {
             setCanceledOnTouchOutside(false)
             setOnDismissListener {
                 activeHostDialogs.remove(activity)
-                WeTypeSettings.bindModuleBridgePendingIntent(null)
             }
         }
         activeHostDialogs[activity] = dialog
@@ -98,7 +93,6 @@ object WeTypeHostLauncher {
             }
         }
         if (cleaned) {
-            WeTypeSettings.bindModuleBridgePendingIntent(null)
             synchronized(moduleResourcesCache) {
                 moduleResourcesCache.clear()
             }
