@@ -33,6 +33,7 @@ import com.xposed.wetypehook.wetype.graphics.WeTypeHyperMaterial
 import com.xposed.wetypehook.wetype.graphics.WeTypeBloomStrokeDrawable
 import com.xposed.wetypehook.wetype.graphics.WeTypeCornerRadii
 import com.xposed.wetypehook.wetype.graphics.createWeTypeContinuousRoundedPath
+import com.xposed.wetypehook.wetype.settings.GlassMaterialOverrides
 import com.xposed.wetypehook.wetype.settings.WeTypeSettings
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
@@ -111,6 +112,7 @@ internal object WeTypeWindowHooks {
     private data class WeTypeWindowState(
         var windowVisible: Boolean = false,
         var backgroundCarrier: View? = null,
+        var carrierOverrides: GlassMaterialOverrides = GlassMaterialOverrides(),
         var hyperMaterial: WeTypeHyperMaterial? = null,
         var stopMaterialObserver: (() -> Unit)? = null,
         var window: WeakReference<Window>? = null,
@@ -1202,7 +1204,10 @@ internal object WeTypeWindowHooks {
             }
         }
 
-        val carrier = ensureBackgroundCarrier(context, decorGroup, state)
+        val overrides = if (settings.hyperMaterialEnabled && WeTypeHyperMaterial.areGlassOverridesAvailable()) {
+            settings.glassOverrides
+        } else GlassMaterialOverrides()
+        val carrier = ensureBackgroundCarrier(context, decorGroup, state, overrides)
         carrier.visibility = View.VISIBLE
         val style = BackgroundStyle(
             color = if (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
@@ -1227,7 +1232,7 @@ internal object WeTypeWindowHooks {
             if (style.hyperMaterialEnabled) {
                 // Remove the old blur/bloom drawable before enabling the system material.
                 carrier.background = Color.TRANSPARENT.toDrawable()
-                if (!material.apply(style.nightMode == Configuration.UI_MODE_NIGHT_YES)) {
+                if (!material.apply(style.nightMode == Configuration.UI_MODE_NIGHT_YES, style.color)) {
                     // An invocation failure keeps the keyboard legible without custom effects.
                     carrier.background = createTintDrawable(WeTypeHyperMaterial.fallbackColor(style.nightMode == Configuration.UI_MODE_NIGHT_YES), cornerRadii)
                 }
@@ -1255,9 +1260,10 @@ internal object WeTypeWindowHooks {
     private fun ensureBackgroundCarrier(
         context: Context,
         decorGroup: ViewGroup,
-        state: WeTypeWindowState
+        state: WeTypeWindowState,
+        overrides: GlassMaterialOverrides
     ): View {
-        val existing = state.backgroundCarrier?.takeIf { it.parent === decorGroup }
+        val existing = state.backgroundCarrier?.takeIf { it.parent === decorGroup && state.carrierOverrides == overrides }
         if (existing != null) return existing
 
         state.backgroundCarrier?.let { oldCarrier ->
@@ -1266,7 +1272,7 @@ internal object WeTypeWindowHooks {
             state.backgroundStyle = null
             state.backgroundViewRoot = null
         }
-        val carrier = View(context).apply {
+        val carrier = FrameLayout(context).apply {
             visibility = View.INVISIBLE
             isClickable = false
             isFocusable = false
@@ -1279,7 +1285,9 @@ internal object WeTypeWindowHooks {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0)
         )
         state.backgroundCarrier = carrier
-        state.hyperMaterial = WeTypeHyperMaterial(carrier)
+        // A fresh RenderNode restores actual ROM defaults when an override is cleared.
+        state.carrierOverrides = overrides
+        state.hyperMaterial = WeTypeHyperMaterial(carrier, overrides)
         return carrier
     }
 

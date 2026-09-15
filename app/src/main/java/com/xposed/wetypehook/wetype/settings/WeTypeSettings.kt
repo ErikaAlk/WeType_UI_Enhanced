@@ -80,7 +80,8 @@ object WeTypeSettings {
         val appearanceColors: Map<String, Int>,
         val toolbarIconBgOpacity: Int,
         val disableHotUpdate: Boolean,
-        val hyperMaterialEnabled: Boolean
+        val hyperMaterialEnabled: Boolean,
+        val glassOverrides: GlassMaterialOverrides = GlassMaterialOverrides()
     )
 
     fun getLightColor(context: Context): Int = readSnapshot(context).lightColor
@@ -163,6 +164,7 @@ object WeTypeSettings {
         appearanceColors: Map<String, Int>,
         disableHotUpdate: Boolean = DEFAULT_DISABLE_HOT_UPDATE,
         hyperMaterialEnabled: Boolean = DEFAULT_HYPER_MATERIAL_ENABLED,
+        glassOverrides: GlassMaterialOverrides = GlassMaterialOverrides(),
         onPersisted: (Boolean) -> Unit = {}
     ): Boolean {
         val snapshot = Snapshot(
@@ -185,7 +187,8 @@ object WeTypeSettings {
                 group.id to (appearanceColors[group.id] ?: group.defaultColor)
             },
             disableHotUpdate = disableHotUpdate,
-            hyperMaterialEnabled = hyperMaterialEnabled
+            hyperMaterialEnabled = hyperMaterialEnabled,
+            glassOverrides = glassOverrides
         )
         val appContext = context.applicationContext ?: context
         if (appContext.packageName != WETYPE_PACKAGE_NAME) {
@@ -300,6 +303,21 @@ object WeTypeSettings {
             .putBoolean(KEY_DISABLE_HOT_UPDATE, snapshot.disableHotUpdate)
             .putBoolean(KEY_KEY_OPACITY_MIGRATED, true)
             .remove(KEY_KEY_OPACITY)
+        fun writeFloatParameters(key: String, values: List<Float>?, maxCount: Int) {
+            editor.remove("${key}_count")
+            repeat(maxCount) { editor.remove("${key}_$it") }
+            values?.let {
+                editor.putInt("${key}_count", it.size)
+                it.forEachIndexed { index, value -> editor.putFloat("${key}_$index", value) }
+            }
+        }
+        writeFloatParameters("glass_params", snapshot.glassOverrides.glass, 42)
+        writeFloatParameters("glass_bloom", snapshot.glassOverrides.bloom, 16)
+        editor.remove("glass_blur_small").remove("glass_blur_large").remove("glass_material_type")
+        snapshot.glassOverrides.blurRadii?.let {
+            editor.putInt("glass_blur_small", it[0]).putInt("glass_blur_large", it[1])
+        }
+        snapshot.glassOverrides.materialType?.let { editor.putInt("glass_material_type", it) }
         WeTypeAppearanceColorGroups.groups.forEach { group ->
             editor.putInt(
                 "$KEY_APPEARANCE_COLOR_PREFIX${group.id}",
@@ -371,6 +389,7 @@ object WeTypeSettings {
                 group.id to migrateLegacyKeyOpacity(group, color, legacyKeyOpacity)
             },
             hyperMaterialEnabled = getBoolean(KEY_HYPER_MATERIAL_ENABLED, DEFAULT_HYPER_MATERIAL_ENABLED),
+            glassOverrides = GlassMaterialOverrides.read(this),
             disableHotUpdate = getBoolean(KEY_DISABLE_HOT_UPDATE, DEFAULT_DISABLE_HOT_UPDATE)
         )
     }
