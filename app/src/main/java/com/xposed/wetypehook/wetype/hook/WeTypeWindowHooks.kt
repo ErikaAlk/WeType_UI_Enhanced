@@ -1,8 +1,10 @@
 package com.xposed.wetypehook.wetype.hook
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Outline
+import android.graphics.Path
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
@@ -36,8 +38,6 @@ import java.util.WeakHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-private const val WETYPE_BLUR_APPLY_MAX_RETRY = 6
-private const val WETYPE_BACKGROUND_SETTLE_RETRY = 3
 private const val WETYPE_COLLAPSED_IME_HEIGHT_THRESHOLD_PX = 2
 private const val WETYPE_HARDWARE_VIEW_CLASS_PREFIX = "com.tencent.wetype.plugin.hld.hardware."
 private const val WETYPE_CANDIDATE_VIEW_CLASS_NAME =
@@ -75,59 +75,59 @@ internal object WeTypeWindowHooks {
         val listener: ViewTreeObserver.OnGlobalLayoutListener
     )
 
+    private data class BackgroundStyle(
+        val color: Int,
+        val blurRadius: Int,
+        val edgeHighlightEnabled: Boolean,
+        val edgeHighlightIntensity: Int,
+        val cornerRadii: WeTypeCornerRadii,
+        val nightMode: Int,
+        val density: Float
+    )
+
+    private class ContinuousCornerOutline(val cornerRadii: WeTypeCornerRadii) : ViewOutlineProvider() {
+        private var cachedWidth = 0
+        private var cachedHeight = 0
+        private var cachedPath: Path? = null
+
+        override fun getOutline(target: View, outline: Outline) {
+            val width = target.width
+            val height = target.height
+            if (width <= 0 || height <= 0) return
+            if (cachedPath == null || width != cachedWidth || height != cachedHeight) {
+                cachedPath = createWeTypeContinuousRoundedPath(width.toFloat(), height.toFloat(), cornerRadii)
+                cachedWidth = width
+                cachedHeight = height
+            }
+            runCatching { outline.setPath(checkNotNull(cachedPath)) }.onFailure {
+                outline.setRoundRect(0, 0, width, height, cornerRadii.maxRadius())
+            }
+        }
+    }
+
     private data class WeTypeWindowState(
-        var blurApplyToken: Int = 0,
-        var blurEligible: Boolean = false,
         var windowVisible: Boolean = false,
         var backgroundCarrier: View? = null,
-        var inputMethodService: Any? = null,
-        var heightChangeListener: View.OnLayoutChangeListener? = null,
-        var registeredViews: MutableList<View> = mutableListOf(),
+        var window: WeakReference<Window>? = null,
+        var resourceReconcilePending: Boolean = false,
+        var backgroundDecorView: WeakReference<View>? = null,
+        var backgroundObserver: WeakReference<ViewTreeObserver>? = null,
+        var backgroundLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null,
+        var backgroundPreDrawListener: ViewTreeObserver.OnPreDrawListener? = null,
+        var backgroundUpdatePending: Boolean = false,
+        var backgroundStyleDirty: Boolean = true,
+        var backgroundStyle: BackgroundStyle? = null,
+        var backgroundViewRoot: Any? = null,
+        var transparentWindowBackground: Drawable? = null,
+        val locationBuffer: IntArray = IntArray(2),
         var computedVisibleImeHeightPx: Int? = null,
         var bottomLeftHardwareCornerRadius: Float? = null,
         var bottomRightHardwareCornerRadius: Float? = null,
         var hardwareViewIds: IntArray? = null,
         var originalWindowStateCaptured: Boolean = false,
         var originalWindowBackground: Drawable? = null,
-        var originalWindowBlurRadius: Int? = null,
-        val outlineSnapshots: MutableMap<View, Pair<Boolean, ViewOutlineProvider?>> = WeakHashMap()
+        var originalWindowBlurRadius: Int? = null
     )
-
-    private data class WeTypeViewSnapshot(
-        val locationY: Int,
-        val top: Int,
-        val height: Int,
-        val measuredHeight: Int,
-        val visibility: Int,
-        val isShown: Boolean
-    ) {
-        fun hasVisibleHeight(): Boolean = visibility == View.VISIBLE && isShown && height > 0
-    }
-
-    private data class WeTypeWindowSnapshot(
-        val decorView: WeTypeViewSnapshot?,
-        val candidatesFrame: WeTypeViewSnapshot?,
-        val inputFrame: WeTypeViewSnapshot?,
-        val inputView: WeTypeViewSnapshot?
-    ) {
-        fun isLayoutReady(): Boolean {
-            val decorReady = (decorView?.height ?: 0) > 0
-            val contentReady = listOf(candidatesFrame, inputFrame, inputView)
-                .any { snapshot -> snapshot != null && (snapshot.height > 0 || snapshot.measuredHeight > 0) }
-            return decorReady && contentReady
-        }
-
-        fun backgroundTop(): Int {
-            val contentTop = listOf(candidatesFrame, inputFrame, inputView)
-                .filter { snapshot -> snapshot?.hasVisibleHeight() == true }
-                .mapNotNull { snapshot ->
-                    val resolved = snapshot ?: return@mapNotNull null
-                    resolved.locationY.takeIf { it > 0 } ?: resolved.top.takeIf { it > 0 }
-                }
-                .minOrNull()
-            return contentTop ?: 0
-        }
-    }
 
     private val weTypeWindowStates = WeakHashMap<Any, WeTypeWindowState>()
     private val overlayStateLock = Any()
@@ -163,23 +163,10 @@ internal object WeTypeWindowHooks {
             overlayWindowVisible = false
             restoreAllCoveredUnderlays(clearTrackedRoots = true)
             states.forEach { state ->
-                state.blurApplyToken++
                 state.windowVisible = false
-                state.blurEligible = false
-                state.registeredViews.forEach { view ->
-                    state.heightChangeListener?.let { view.removeOnLayoutChangeListener(it) }
-                }
-                state.registeredViews.clear()
-                state.heightChangeListener = null
-                state.outlineSnapshots.forEach { (view, snapshot) ->
-                    view.clipToOutline = snapshot.first
-                    view.outlineProvider = snapshot.second
-                    view.invalidateOutline()
-                }
-                state.outlineSnapshots.clear()
+                removeBackgroundListeners(state)
                 restoreWindowState(state)
                 removeBackgroundCarrier(state)
-                state.inputMethodService = null
             }
         }
         if (cleaned) {
@@ -910,7 +897,10 @@ internal object WeTypeWindowHooks {
                     onWindowStage(param.thisObject, "updateFullscreenMode")
                 }
             }
-            inputMethodService.getMethod(
+            // Observe the final host result, including its normal/floating/hardware proxy.
+            val insetService = loadClassOrNull("com.tencent.wetype.plugin.hld.WxHldService")
+                ?: inputMethodService
+            insetService.getMethod(
                 "onComputeInsets",
                 InputMethodService.Insets::class.java
             ).hookAfter { param ->
@@ -938,78 +928,41 @@ internal object WeTypeWindowHooks {
         }
     }
 
-    fun hookWindowCorner() {
-        runCatching {
-            val inputMethodService = loadClassOrNull("android.inputmethodservice.InputMethodService")
-                ?: error("Failed to load InputMethodService")
-
-            inputMethodService.getMethod("onCreate").hookAfter { param ->
-                applyWindowCorner(param.thisObject)
-            }
-            inputMethodService.getMethod(
-                "onStartInputView",
-                EditorInfo::class.java,
-                Boolean::class.javaPrimitiveType
-            ).hookAfter { param ->
-                applyWindowCorner(param.thisObject)
-            }
-            runCatching {
-                inputMethodService.getMethod("onWindowShown").hookAfter { param ->
-                    applyWindowCorner(param.thisObject)
-                }
-            }
-            Log.i("Success: Hook WeType window corner")
-        }.onFailure {
-            Log.i("Failed: Hook WeType window corner")
-            Log.i(it)
-        }
-    }
-
-    fun reconcileCurrentInputMethodService(
-        inputMethodService: InputMethodService,
-        attempt: Int = 0
-    ) {
-        if (!inputMethodService.isInputViewShown) {
-            if (attempt >= WETYPE_BACKGROUND_SETTLE_RETRY) return
-            val decorView = runCatching {
-                val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow")
-                softInputWindow?.invokeMethodAs<Window>("getWindow")?.decorView
-            }.getOrNull() ?: return
-            HookEnvironment.postTracked(decorView, 100L) {
-                reconcileCurrentInputMethodService(inputMethodService, attempt + 1)
-            }
-            return
-        }
+    fun reconcileCurrentInputMethodService(inputMethodService: InputMethodService) {
+        // Hidden windows are initialized by their next onWindowShown callback.
+        if (!inputMethodService.isInputViewShown) return
         val state = getWindowState(inputMethodService)
         state.windowVisible = true
-        state.blurEligible = true
         state.computedVisibleImeHeightPx = null
-        applyWindowCorner(inputMethodService)
         scheduleWindowBlur(inputMethodService)
         reconcileCurrentResourceViews(inputMethodService)
     }
 
     private fun reconcileCurrentResourceViews(inputMethodService: Any) {
         val decorView = resolveInputMethodDecorView(inputMethodService) ?: return
-        WeTypeResourceHooks.reconcileCurrentKeyboardLogos(listOf(decorView))
-        HookEnvironment.postTracked(decorView) {
-            WeTypeResourceHooks.reconcileCurrentKeyboardLogos(listOf(decorView))
-        }
-        HookEnvironment.postTracked(decorView, 100L) {
-            WeTypeResourceHooks.reconcileCurrentKeyboardLogos(listOf(decorView))
+        val state = getWindowState(inputMethodService)
+        if (state.resourceReconcilePending) return
+        state.resourceReconcilePending = true
+        // Both lifecycle callbacks can run in the same turn. Reconcile once after the
+        // host has finished installing its views; newly bound logos have their own hooks.
+        if (!HookEnvironment.postTracked(decorView) {
+                state.resourceReconcilePending = false
+                if (state.windowVisible) {
+                    WeTypeResourceHooks.reconcileCurrentKeyboardLogos(listOf(decorView))
+                }
+            }) {
+            state.resourceReconcilePending = false
         }
     }
 
     private fun resolveInputMethodDecorView(inputMethodService: Any): View? = runCatching {
-        val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow")
-        softInputWindow?.invokeMethodAs<Window>("getWindow")?.decorView
+        (inputMethodService as? InputMethodService)?.window?.window?.decorView
     }.getOrNull()
 
     private fun onComputeInsets(inputMethodService: Any, insets: InputMethodService.Insets?) {
         runCatching {
             val state = getWindowState(inputMethodService)
-            val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return@runCatching
-            val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return@runCatching
+            val window = (inputMethodService as? InputMethodService)?.window?.window ?: return@runCatching
             val rootHeight = window.decorView.rootView?.height?.takeIf { it > 0 }
                 ?: window.decorView.height.takeIf { it > 0 }
                 ?: return@runCatching
@@ -1020,14 +973,11 @@ internal object WeTypeWindowHooks {
 
             if (!state.windowVisible) return@runCatching
             if (visibleImeHeight <= WETYPE_COLLAPSED_IME_HEIGHT_THRESHOLD_PX) {
-                val wasExpanded = previousVisibleImeHeight
-                    ?.let { it > WETYPE_COLLAPSED_IME_HEIGHT_THRESHOLD_PX } != false
-                if (wasExpanded) state.blurApplyToken++
                 hideBackgroundCarrier(state)
                 return@runCatching
             }
             if (visibleImeHeight == previousVisibleImeHeight) return@runCatching
-            if (state.blurEligible) scheduleWindowBlur(inputMethodService)
+            scheduleWindowBlur(inputMethodService, refreshStyle = false)
         }.onFailure {
             Log.i("Failed: Track WeType visible IME height")
             Log.i(it)
@@ -1040,20 +990,16 @@ internal object WeTypeWindowHooks {
             when (stage) {
                 "onStartInputView" -> {
                     state.computedVisibleImeHeightPx = null
-                    state.blurEligible = state.windowVisible
                 }
                 "onWindowShown" -> {
                     state.windowVisible = true
-                    state.blurEligible = true
                     state.computedVisibleImeHeightPx = null
                 }
                 "updateFullscreenMode" -> {
                     if (!state.windowVisible) return@runCatching
-                    state.blurEligible = true
                 }
             }
 
-            if (!state.blurEligible) return@runCatching
             scheduleWindowBlur(inputMethodService)
         }.onFailure {
             Log.i("Failed: Handle WeType window stage")
@@ -1061,96 +1007,82 @@ internal object WeTypeWindowHooks {
         }
     }
 
-    private fun scheduleWindowBlur(inputMethodService: Any) {
+    private fun scheduleWindowBlur(inputMethodService: Any, refreshStyle: Boolean = true) {
         val state = getWindowState(inputMethodService)
         if (!state.windowVisible) return
-        val token = ++state.blurApplyToken
-        applyWindowBlurWhenReady(inputMethodService, token, 0)
-    }
-
-    private fun applyWindowBlurWhenReady(inputMethodService: Any, token: Int, attempt: Int) {
-        runCatching {
-            val state = getWindowState(inputMethodService)
-            if (state.blurApplyToken != token) return
-            if (!state.windowVisible || !state.blurEligible) return
-
-            val context = inputMethodService as? Context ?: return
-            val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return
-            val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return
-            val decorView = window.decorView
-            val snapshot = collectWindowSnapshot(inputMethodService) ?: return
-
-            if (shouldHideBackground(inputMethodService, decorView, state)) {
-                hideBackgroundCarrier(state)
-                return
-            }
-
-            if (snapshot.isLayoutReady()) {
-                applyBackgroundCarrier(inputMethodService, window, decorView, context, state, snapshot)
-                scheduleBackgroundSettle(inputMethodService, token, WETYPE_BACKGROUND_SETTLE_RETRY)
-                return
-            }
-
-            if (attempt >= WETYPE_BLUR_APPLY_MAX_RETRY) return
-            HookEnvironment.postTracked(decorView) {
-                applyWindowBlurWhenReady(inputMethodService, token, attempt + 1)
-            }
-        }.onFailure {
-            Log.i("Failed: Apply WeType window blur")
-            Log.i(it)
+        val window = (inputMethodService as? InputMethodService)?.window?.window ?: return
+        val decorView = window.decorView
+        val observer = decorView.viewTreeObserver
+        if (!observer.isAlive) return
+        state.window = WeakReference(window)
+        val updateAlreadyPending = state.backgroundUpdatePending
+        state.backgroundUpdatePending = true
+        state.backgroundStyleDirty = state.backgroundStyleDirty || refreshStyle
+        if (state.backgroundObserver?.get() === observer) {
+            if (!updateAlreadyPending && refreshStyle) decorView.invalidate()
+            return
         }
-    }
+        removeBackgroundListeners(state)
+        state.backgroundUpdatePending = true
 
-    private fun scheduleBackgroundSettle(inputMethodService: Any, token: Int, remaining: Int) {
-        if (remaining <= 0) return
-        runCatching {
-            val state = getWindowState(inputMethodService)
-            if (state.blurApplyToken != token) return
-            if (!state.windowVisible || !state.blurEligible) return
-
-            val context = inputMethodService as? Context ?: return
-            val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return
-            val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return
-            val decorView = window.decorView
-
-            HookEnvironment.postTracked(decorView) {
+        val layoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+            state.backgroundUpdatePending = true
+        }
+        val serviceReference = WeakReference(inputMethodService)
+        val preDrawListener = ViewTreeObserver.OnPreDrawListener {
+            if (!state.windowVisible || !state.backgroundUpdatePending) {
+                true
+            } else {
+                // A new layout/inset/lifecycle event will re-arm this work. An invalid
+                // snapshot must not turn an unrelated animation into a per-frame retry loop.
+                state.backgroundUpdatePending = false
                 runCatching {
-                    val latestState = getWindowState(inputMethodService)
-                    if (latestState.blurApplyToken != token) return@runCatching
-                    if (!latestState.windowVisible || !latestState.blurEligible) return@runCatching
-
-                    val latestSoftInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return@runCatching
-                    val latestWindow = latestSoftInputWindow.invokeMethodAs<Window>("getWindow") ?: return@runCatching
-                    val latestDecorView = latestWindow.decorView
-                    val snapshot = collectWindowSnapshot(inputMethodService) ?: return@runCatching
-                    if (shouldHideBackground(inputMethodService, latestDecorView, latestState)) {
-                        hideBackgroundCarrier(latestState)
-                        scheduleBackgroundSettle(inputMethodService, token, remaining - 1)
-                        return@runCatching
+                    val service = serviceReference.get() as? InputMethodService ?: return@runCatching true
+                    val context: Context = service
+                    val window = service.window?.window ?: return@runCatching true
+                    val latestDecorView = window.decorView
+                    if (shouldHideBackground(latestDecorView, state)) {
+                        hideBackgroundCarrier(state)
+                        return@runCatching true
                     }
-                    if (!snapshot.isLayoutReady()) {
-                        scheduleBackgroundSettle(inputMethodService, token, remaining - 1)
-                        return@runCatching
+                    val bounds = collectBackgroundBounds(service, latestDecorView, state.locationBuffer)
+                    if (bounds == null) {
+                        // Never display a stale/full-window estimate while the host relayouts.
+                        hideBackgroundCarrier(state)
+                        return@runCatching true
                     }
-                    applyBackgroundCarrier(inputMethodService, latestWindow, latestDecorView, context, latestState, snapshot)
-                    scheduleBackgroundSettle(inputMethodService, token, remaining - 1)
-                }.onFailure {
-                    Log.i("Failed: Settle WeType background carrier")
+                    applyBackgroundCarrier(window, latestDecorView, context, state, bounds)
+                    true
+                }.getOrElse {
+                    Log.i("Failed: Apply WeType background before drawing")
                     Log.i(it)
+                    true
                 }
             }
         }
+        state.backgroundDecorView = WeakReference(decorView)
+        state.backgroundObserver = WeakReference(observer)
+        state.backgroundLayoutListener = layoutListener
+        state.backgroundPreDrawListener = preDrawListener
+        observer.addOnGlobalLayoutListener(layoutListener)
+        observer.addOnPreDrawListener(preDrawListener)
+        decorView.invalidate()
     }
 
-    private fun applyWindowCorner(inputMethodService: Any) {
-        runCatching {
-            val state = getWindowState(inputMethodService)
-            val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return
-            val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return
-            val decorView = window.decorView
-            val cornerRadii = resolveCornerRadii(decorView, decorView.context, state)
-            applyContinuousCornerOutline(decorView, cornerRadii, state)
+    private fun removeBackgroundListeners(state: WeTypeWindowState) {
+        // Attaching a window can merge its floating observer into a new live observer.
+        listOfNotNull(
+            state.backgroundObserver?.get(),
+            state.backgroundDecorView?.get()?.viewTreeObserver
+        ).distinct().filter { it.isAlive }.forEach { observer ->
+            state.backgroundLayoutListener?.let(observer::removeOnGlobalLayoutListener)
+            state.backgroundPreDrawListener?.let(observer::removeOnPreDrawListener)
         }
+        state.backgroundDecorView = null
+        state.backgroundObserver = null
+        state.backgroundLayoutListener = null
+        state.backgroundPreDrawListener = null
+        state.backgroundUpdatePending = false
     }
 
     private fun getWindowState(inputMethodService: Any): WeTypeWindowState =
@@ -1162,9 +1094,8 @@ internal object WeTypeWindowHooks {
         runCatching {
             val state = getWindowState(inputMethodService)
             state.windowVisible = false
-            state.blurEligible = false
             state.computedVisibleImeHeightPx = null
-            state.blurApplyToken++
+            removeBackgroundListeners(state)
             hideBackgroundCarrier(state)
             if (removeCarrier) {
                 removeBackgroundCarrier(state)
@@ -1178,10 +1109,10 @@ internal object WeTypeWindowHooks {
         }
     }
 
-    private fun resolveCornerRadii(targetView: View, context: Context, state: WeTypeWindowState): WeTypeCornerRadii {
+    private fun resolveCornerRadii(targetView: View, context: Context, state: WeTypeWindowState, cornerRadiusDp: Int): WeTypeCornerRadii {
         val topRadius = android.util.TypedValue.applyDimension(
             android.util.TypedValue.COMPLEX_UNIT_DIP,
-            WeTypeSettings.getCornerRadiusXposed(context).toFloat(),
+            cornerRadiusDp.toFloat(),
             context.resources.displayMetrics
         )
         val insets = targetView.rootWindowInsets
@@ -1197,41 +1128,51 @@ internal object WeTypeWindowHooks {
         )
     }
 
-    private fun collectWindowSnapshot(inputMethodService: Any): WeTypeWindowSnapshot? {
-        val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return null
-        val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return null
-        return WeTypeWindowSnapshot(
-            decorView = window.decorView.toViewSnapshot(),
-            candidatesFrame = readViewField(inputMethodService, "mCandidatesFrame")?.toViewSnapshot(),
-            inputFrame = readViewField(inputMethodService, "mInputFrame")?.toViewSnapshot(),
-            inputView = runCatching { inputMethodService.invokeMethodAs<View>("getInputView") }.getOrNull()?.toViewSnapshot()
+    private fun collectBackgroundBounds(
+        inputMethodService: Any,
+        decorView: View,
+        location: IntArray
+    ): WeTypeBackgroundBounds? {
+        val contentViews = listOfNotNull(
+            readViewField(inputMethodService, "mCandidatesFrame"),
+            readViewField(inputMethodService, "mInputFrame"),
+            runCatching { inputMethodService.invokeMethodAs<View>("getInputView") }.getOrNull()
+        )
+        return resolveWeTypeBackgroundBounds(
+            decorView.toBackgroundLayout(location),
+            contentViews.map { it.toBackgroundLayout(location) }
         )
     }
 
     private fun readViewField(inputMethodService: Any, fieldName: String): View? =
         runCatching { inputMethodService.getObjectAs<View>(fieldName) }.getOrNull()
 
-    private fun View.toViewSnapshot(): WeTypeViewSnapshot {
-        val location = IntArray(2)
-        runCatching { getLocationInWindow(location) }
-        return WeTypeViewSnapshot(
-            locationY = location[1],
-            top = top,
+    private fun View.toBackgroundLayout(location: IntArray): WeTypeBackgroundLayout {
+        getLocationInWindow(location)
+        return WeTypeBackgroundLayout(
+            windowTop = location[1],
             height = height,
-            measuredHeight = measuredHeight,
-            visibility = visibility,
-            isShown = isShown
+            isShown = isShown,
+            isLaidOut = isAttachedToWindow && isLaidOut,
+            isLayoutRequested = isLayoutRequested
         )
     }
 
     private fun applyBackgroundCarrier(
-        inputMethodService: Any,
         window: Window,
         decorView: View,
         context: Context,
         state: WeTypeWindowState,
-        snapshot: WeTypeWindowSnapshot
+        bounds: WeTypeBackgroundBounds
     ) {
+        val decorGroup = decorView as? ViewGroup ?: return
+        val backgroundHeight = bounds.height
+        val settings = WeTypeSettings.readSnapshotXposed()
+        val cornerRadii = resolveCornerRadii(decorView, context, state, settings.cornerRadius)
+        if (backgroundHeight < cornerRadii.maxRadius()) {
+            hideBackgroundCarrier(state)
+            return
+        }
         if (!state.originalWindowStateCaptured) {
             state.originalWindowBackground = decorView.background
             state.originalWindowBlurRadius = runCatching {
@@ -1239,94 +1180,61 @@ internal object WeTypeWindowHooks {
             }.getOrNull()
             state.originalWindowStateCaptured = true
         }
-        window.setBackgroundBlurRadius(0)
-        window.setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
-
-        if (shouldHideBackground(inputMethodService, decorView, state)) {
-            hideBackgroundCarrier(state)
-            return
-        }
-
-        val decorGroup = decorView as? ViewGroup ?: return
-        val decorHeight = snapshot.decorView?.height ?: decorGroup.height
-        val backgroundTop = snapshot.backgroundTop().coerceIn(0, decorHeight)
-        val backgroundHeight = (decorHeight - backgroundTop).coerceAtLeast(0)
-        val carrier = ensureBackgroundCarrier(context, decorGroup, state, inputMethodService)
-        val layoutParams = (carrier.layoutParams as? FrameLayout.LayoutParams)
-            ?: FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, backgroundHeight)
-        layoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT
-        layoutParams.height = backgroundHeight
-        layoutParams.topMargin = backgroundTop
-        carrier.layoutParams = layoutParams
-
-        val cornerRadii = resolveCornerRadii(decorView, context, state)
-        if (backgroundHeight < cornerRadii.maxRadius()) {
-            hideBackgroundCarrier(state)
-            return
-        }
-
-        carrier.visibility = View.VISIBLE
-        applyContinuousCornerOutline(carrier, cornerRadii, state)
-        carrier.background = createBackgroundDrawable(carrier, context, cornerRadii)
-        setupHeightChangeListeners(inputMethodService, context, state)
-    }
-
-    private fun setupHeightChangeListeners(inputMethodService: Any, context: Context, state: WeTypeWindowState) {
-        state.registeredViews.forEach { view ->
-            state.heightChangeListener?.let { view.removeOnLayoutChangeListener(it) }
-        }
-        state.registeredViews.clear()
-
-        val listener = View.OnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
-            val oldHeight = oldBottom - oldTop
-            val newHeight = bottom - top
-            if (oldHeight == newHeight) return@OnLayoutChangeListener
-
-            runCatching {
-                if (!state.windowVisible || !state.blurEligible) return@runCatching
-                val ims = state.inputMethodService ?: return@runCatching
-                val softInputWindow = ims.invokeMethodAs<Any>("getWindow") ?: return@runCatching
-                val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return@runCatching
-                val decorView = window.decorView
-                val snapshot = collectWindowSnapshot(ims) ?: return@runCatching
-                if (shouldHideBackground(ims, decorView, state)) {
-                    hideBackgroundCarrier(state)
-                    return@runCatching
-                }
-                if (snapshot.isLayoutReady()) {
-                    applyBackgroundCarrier(ims, window, decorView, context, state, snapshot)
-                }
-            }.onFailure {
-                Log.i("Failed: Reapply background on height change")
-                Log.i(it)
+        if (state.backgroundStyleDirty) {
+            val transparent = state.transparentWindowBackground
+                ?: Color.TRANSPARENT.toDrawable().also { state.transparentWindowBackground = it }
+            if (decorView.background !== transparent) {
+                window.setBackgroundBlurRadius(0)
+                window.setBackgroundDrawable(transparent)
             }
         }
-        state.heightChangeListener = listener
 
-        readViewField(inputMethodService, "mCandidatesFrame")?.also {
-            it.addOnLayoutChangeListener(listener)
-            state.registeredViews.add(it)
+        val carrier = ensureBackgroundCarrier(context, decorGroup, state)
+        carrier.visibility = View.VISIBLE
+        val style = BackgroundStyle(
+            color = if (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES) settings.darkColor else settings.lightColor,
+            blurRadius = settings.blurRadius,
+            edgeHighlightEnabled = settings.edgeHighlightEnabled,
+            edgeHighlightIntensity = settings.edgeHighlightIntensity,
+            cornerRadii = cornerRadii,
+            nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK,
+            density = context.resources.displayMetrics.density
+        )
+        val viewRoot = if (state.backgroundStyleDirty || carrier.background == null) {
+            runCatching { carrier.invokeMethodAs<Any>("getViewRootImpl") }.getOrNull()
+        } else {
+            state.backgroundViewRoot
         }
-        readViewField(inputMethodService, "mInputFrame")?.also {
-            it.addOnLayoutChangeListener(listener)
-            state.registeredViews.add(it)
+        if (carrier.background == null || state.backgroundStyle != style || state.backgroundViewRoot !== viewRoot) {
+            applyContinuousCornerOutline(carrier, cornerRadii)
+            carrier.background = createBackgroundDrawable(carrier, context, style)
+            state.backgroundStyle = style
+            state.backgroundViewRoot = viewRoot
         }
-        runCatching { inputMethodService.invokeMethodAs<View>("getInputView") }.getOrNull()?.also {
-            it.addOnLayoutChangeListener(listener)
-            state.registeredViews.add(it)
+        state.backgroundStyleDirty = false
+        // This decorative child keeps a zero-height layout spec. Its rendered bounds must
+        // not feed back into the IME's measurement or the app-facing inset calculation.
+        if (carrier.width != decorView.width || carrier.height != backgroundHeight || carrier.top != bounds.top) {
+            carrier.measure(
+                View.MeasureSpec.makeMeasureSpec(decorView.width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(backgroundHeight, View.MeasureSpec.EXACTLY)
+            )
+            carrier.layout(0, bounds.top, decorView.width, bounds.top + backgroundHeight)
+            carrier.invalidateOutline()
         }
     }
 
     private fun ensureBackgroundCarrier(
         context: Context,
         decorGroup: ViewGroup,
-        state: WeTypeWindowState,
-        inputMethodService: Any
+        state: WeTypeWindowState
     ): View {
         val existing = state.backgroundCarrier?.takeIf { it.parent === decorGroup }
         if (existing != null) return existing
 
         val carrier = View(context).apply {
+            visibility = View.INVISIBLE
             isClickable = false
             isFocusable = false
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -1338,12 +1246,10 @@ internal object WeTypeWindowHooks {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0)
         )
         state.backgroundCarrier = carrier
-        state.inputMethodService = inputMethodService
         return carrier
     }
 
     private fun shouldHideBackground(
-        inputMethodService: Any,
         decorView: View,
         state: WeTypeWindowState
     ): Boolean {
@@ -1351,12 +1257,12 @@ internal object WeTypeWindowHooks {
             ?.let { it <= WETYPE_COLLAPSED_IME_HEIGHT_THRESHOLD_PX } == true
         if (collapsedByInsets) return true
 
-        val inputView = runCatching { inputMethodService.invokeMethodAs<View>("getInputView") }.getOrNull()
-        if (inputView != null && containsWeTypeHardwareView(inputView, state)) return true
+        // The input view is already a descendant of decor; do not scan it twice.
         return containsWeTypeHardwareView(decorView, state)
     }
 
     private fun containsWeTypeHardwareView(view: View, state: WeTypeWindowState): Boolean {
+        if (view.visibility != View.VISIBLE) return false
         val className = view.javaClass.name
         if (className.startsWith(WETYPE_HARDWARE_VIEW_CLASS_PREFIX)) return true
 
@@ -1378,35 +1284,23 @@ internal object WeTypeWindowHooks {
         }.toIntArray()
 
     private fun hideBackgroundCarrier(state: WeTypeWindowState) {
-        state.registeredViews.forEach { view ->
-            state.heightChangeListener?.let { view.removeOnLayoutChangeListener(it) }
-        }
-        state.registeredViews.clear()
-
         val carrier = state.backgroundCarrier ?: return
-        carrier.visibility = View.GONE
-        carrier.background = null
-        (carrier.layoutParams as? FrameLayout.LayoutParams)?.let { layoutParams ->
-            layoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT
-            layoutParams.height = 0
-            layoutParams.topMargin = 0
-            carrier.layoutParams = layoutParams
-        }
+        carrier.visibility = View.INVISIBLE
     }
 
     private fun removeBackgroundCarrier(state: WeTypeWindowState) {
         val carrier = state.backgroundCarrier ?: return
         (carrier.parent as? ViewGroup)?.removeView(carrier)
         state.backgroundCarrier = null
-        state.inputMethodService = null
+        state.backgroundStyle = null
+        state.backgroundViewRoot = null
+        state.window = null
     }
 
     private fun restoreWindowState(state: WeTypeWindowState) {
         if (!state.originalWindowStateCaptured) return
-        val inputMethodService = state.inputMethodService ?: return
+        val window = state.window?.get() ?: return
         runCatching {
-            val softInputWindow = inputMethodService.invokeMethodAs<Any>("getWindow") ?: return@runCatching
-            val window = softInputWindow.invokeMethodAs<Window>("getWindow") ?: return@runCatching
             window.setBackgroundBlurRadius(state.originalWindowBlurRadius ?: 0)
             window.setBackgroundDrawable(state.originalWindowBackground)
         }
@@ -1415,11 +1309,8 @@ internal object WeTypeWindowHooks {
         state.originalWindowBlurRadius = null
     }
 
-    private fun createBackgroundDrawable(targetView: View, context: Context, cornerRadii: WeTypeCornerRadii): Drawable {
-        val color = WeTypeSettings.getCurrentBackgroundColorXposed(context)
-        val blurRadius = WeTypeSettings.getBlurRadiusXposed(context)
-        val edgeHighlightEnabled = WeTypeSettings.isEdgeHighlightEnabledXposed(context)
-        val edgeHighlightIntensity = WeTypeSettings.getEdgeHighlightIntensityXposed(context)
+    private fun createBackgroundDrawable(targetView: View, context: Context, style: BackgroundStyle): Drawable {
+        val (color, blurRadius, edgeHighlightEnabled, edgeHighlightIntensity, cornerRadii) = style
         val tintDrawable = createTintDrawable(color, cornerRadii)
         val blurDrawable = createInternalBackgroundBlurDrawable(targetView, blurRadius, cornerRadii)
         val layers = buildList {
@@ -1473,25 +1364,12 @@ internal object WeTypeWindowHooks {
 
     private fun applyContinuousCornerOutline(
         view: View,
-        cornerRadii: WeTypeCornerRadii,
-        state: WeTypeWindowState
+        cornerRadii: WeTypeCornerRadii
     ) {
-        state.outlineSnapshots.putIfAbsent(view, view.clipToOutline to view.outlineProvider)
+        val current = view.outlineProvider as? ContinuousCornerOutline
+        if (current?.cornerRadii == cornerRadii && view.clipToOutline) return
         view.clipToOutline = true
-        view.outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(target: View, outline: Outline) {
-                val width = target.width
-                val height = target.height
-                if (width <= 0 || height <= 0) return
-                val path = createWeTypeContinuousRoundedPath(width.toFloat(), height.toFloat(), cornerRadii)
-                runCatching {
-                    Outline::class.java.getMethod("setPath", android.graphics.Path::class.java)
-                        .invoke(outline, path)
-                }.onFailure {
-                    outline.setRoundRect(0, 0, width, height, cornerRadii.maxRadius())
-                }
-            }
-        }
+        view.outlineProvider = ContinuousCornerOutline(cornerRadii)
         view.invalidateOutline()
     }
 

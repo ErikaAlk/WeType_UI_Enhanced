@@ -16,7 +16,9 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.ViewTreeObserver
 import android.view.inputmethod.InputMethodManager
+import android.widget.LinearLayout
 import com.xposed.wetypehook.wetype.hook.WeTypeResourceHooks
 import com.xposed.wetypehook.wetype.hook.WeTypeUpdateHooks
 import com.xposed.wetypehook.wetype.hook.WeTypeWindowHooks
@@ -48,7 +50,6 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.lang.ref.WeakReference
-import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -90,10 +91,15 @@ class MainHook : XposedModule() {
         "com.xiaomi.type"
     )
     private val installedHookTokens = ConcurrentHashMap.newKeySet<String>()
-    private val monitoredImeInputFrames = Collections.newSetFromMap(WeakHashMap<ViewGroup, Boolean>())
-    private val imeInputFrameLayoutListeners = WeakHashMap<ViewGroup, View.OnLayoutChangeListener>()
+    private data class ImeFrameLayoutRegistration(
+        val observer: WeakReference<ViewTreeObserver>,
+        val listener: ViewTreeObserver.OnGlobalLayoutListener
+    )
+    private val imeInputFrameLayoutListeners = WeakHashMap<ViewGroup, ImeFrameLayoutRegistration>()
+    private val imeFrameLocation = IntArray(2)
     private val originalImeContentBottomPaddings = WeakHashMap<View, Int>()
-    private val originalFullscreenAreaHeights = WeakHashMap<ViewGroup, IntArray>()
+    private data class FullscreenAreaLayout(val height: Int, val weight: Float)
+    private val originalFullscreenAreaLayouts = WeakHashMap<ViewGroup, FullscreenAreaLayout>()
     private val adjustedImeContentViews = WeakHashMap<ViewGroup, WeakReference<View>>()
     private val miuiBottomFrameViews = WeakHashMap<
         ViewGroup,
@@ -299,7 +305,6 @@ class MainHook : XposedModule() {
         HookEnvironment.withHookScope("wetype.candidate-corner") { hookWeTypeCandidateBackgroundCorner() }
         HookEnvironment.withHookScope("wetype.pinyin-margin") { hookWeTypeCandidatePinyinLeftMargin() }
         HookEnvironment.withHookScope("wetype.window-blur") { hookWeTypeWindowBlur() }
-        HookEnvironment.withHookScope("wetype.window-corner") { hookWeTypeWindowCorner() }
         HookEnvironment.withHookScope("wetype.disable-update") { hookWeTypeDisableHotUpdate() }
         HookEnvironment.withHookScope("wetype.intent-entry") { hookWeTypeIntentEntry() }
         HookEnvironment.withHookScope("wetype.about-entry") { hookWeTypeAboutLogoEntry() }
@@ -424,14 +429,19 @@ class MainHook : XposedModule() {
             WeakReference(rootView),
             WeakReference(bottomArea)
         )
-        if (monitoredImeInputFrames.add(inputFrame)) {
-            val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                reconcileMiuiBottomFrame(inputFrame)
+        if (!imeInputFrameLayoutListeners.containsKey(inputFrame)) {
+            val observer = rootView.viewTreeObserver
+            val frameReference = WeakReference(inputFrame)
+            // Wait for the whole tree, including the sibling bottom bar, to finish layout.
+            // Listening only to inputFrame bounds misses child-only and bottom-bar changes.
+            val listener = ViewTreeObserver.OnGlobalLayoutListener {
+                frameReference.get()?.let(::reconcileMiuiBottomFrame)
             }
-            imeInputFrameLayoutListeners[inputFrame] = listener
-            inputFrame.addOnLayoutChangeListener(listener)
+            observer.addOnGlobalLayoutListener(listener)
+            imeInputFrameLayoutListeners[inputFrame] = ImeFrameLayoutRegistration(
+                WeakReference(observer), listener
+            )
         }
-        HookEnvironment.postTracked(inputFrame) { reconcileMiuiBottomFrame(inputFrame) }
     }
 
     private fun reconcileCurrentImeFrame(clazz: Class<*>) {
@@ -451,7 +461,6 @@ class MainHook : XposedModule() {
             ?: miuiBottomFrameViews.keys.toList()
         inputFrames.forEach { inputFrame ->
             HookEnvironment.postTracked(inputFrame) { reconcileMiuiBottomFrame(inputFrame) }
-            HookEnvironment.postTracked(inputFrame, 100L) { reconcileMiuiBottomFrame(inputFrame) }
         }
     }
 
@@ -478,6 +487,12 @@ class MainHook : XposedModule() {
             restoreMiuiBottomFrame(inputFrame, fullscreenArea)
             return
         }
+        if (fullscreenArea.visibility != View.INVISIBLE ||
+            fullscreenArea.layoutParams !is LinearLayout.LayoutParams
+        ) {
+            restoreMiuiBottomFrame(inputFrame, fullscreenArea)
+            return
+        }
         val adjustedContentReference = adjustedImeContentViews[inputFrame]
         val adjustedContentView = adjustedContentReference?.get()
         if (adjustedContentReference != null && adjustedContentView !== contentView) {
@@ -487,8 +502,7 @@ class MainHook : XposedModule() {
         val originalPadding = originalImeContentBottomPaddings[contentView]
         val isCurrentContentAdjusted = adjustedImeContentViews[inputFrame]?.get() === contentView
         val isAlreadyAdjusted = isCurrentContentAdjusted &&
-            originalPadding == navigationInset &&
-            contentView.paddingBottom == 0
+            originalPadding != null && contentView.paddingBottom == 0
         val fillsInputFrame = inputFrame.paddingBottom == 0 &&
             contentView.top == inputFrame.paddingTop &&
             contentView.bottom == inputFrame.height
@@ -499,7 +513,9 @@ class MainHook : XposedModule() {
             return
         }
 
-        originalImeContentBottomPaddings.putIfAbsent(contentView, contentView.paddingBottom)
+        // This padding was identified as the system navigation inset. Track its live
+        // value while removed, so leaving this mode restores the current inset.
+        originalImeContentBottomPaddings[contentView] = navigationInset
         if (!isAlreadyAdjusted) {
             contentView.setPadding(
                 contentView.paddingLeft,
@@ -509,33 +525,22 @@ class MainHook : XposedModule() {
             )
         }
         adjustedImeContentViews[inputFrame] = WeakReference(contentView)
-        if (!expandFullscreenArea(fullscreenArea, navigationInset)) {
+        if (!useFlexibleFullscreenSpacer(fullscreenArea)) {
             restoreMiuiBottomFrame(inputFrame, fullscreenArea)
         }
     }
 
-    private fun expandFullscreenArea(fullscreenArea: ViewGroup, navigationInset: Int): Boolean {
-        val params = fullscreenArea.layoutParams ?: return false
-        val previous = originalFullscreenAreaHeights[fullscreenArea]
-        val currentHeight = params.height
-        val baseHeight = when {
-            previous == null -> currentHeight
-            currentHeight == previous[2] && navigationInset == previous[1] -> return true
-            currentHeight == previous[2] || currentHeight == previous[0] -> previous[0]
-            else -> currentHeight
-        }
-        val targetHeight = if (baseHeight >= 0) {
-            baseHeight + navigationInset
-        } else {
-            fullscreenArea.measuredHeight + navigationInset
-        }
-        originalFullscreenAreaHeights[fullscreenArea] = intArrayOf(
-            baseHeight,
-            navigationInset,
-            targetHeight
-        )
-        if (currentHeight != targetHeight) {
-            params.height = targetHeight
+    private fun useFlexibleFullscreenSpacer(fullscreenArea: ViewGroup): Boolean {
+        // Only the inactive extraction area is a spacer. Visible extraction/candidate
+        // content must retain the host's own layout policy.
+        if (fullscreenArea.visibility != View.INVISIBLE) return false
+        val params = fullscreenArea.layoutParams as? LinearLayout.LayoutParams ?: return false
+        if (params.height != 0 || params.weight != 1f) {
+            originalFullscreenAreaLayouts[fullscreenArea] = FullscreenAreaLayout(params.height, params.weight)
+            // Let LinearLayout assign the remaining space on every measurement. Freezing
+            // a measured height here can constrain subsequent keyboard size changes.
+            params.height = 0
+            params.weight = 1f
             fullscreenArea.layoutParams = params
         }
         return true
@@ -553,10 +558,11 @@ class MainHook : XposedModule() {
                 )
             }
         }
-        val height = originalFullscreenAreaHeights.remove(fullscreenArea) ?: return
-        val params = fullscreenArea.layoutParams ?: return
-        if (params.height == height[2]) {
-            params.height = height[0]
+        val original = originalFullscreenAreaLayouts.remove(fullscreenArea) ?: return
+        val params = fullscreenArea.layoutParams as? LinearLayout.LayoutParams ?: return
+        if (params.height == 0 && params.weight == 1f) {
+            params.height = original.height
+            params.weight = original.weight
             fullscreenArea.layoutParams = params
         }
     }
@@ -568,14 +574,13 @@ class MainHook : XposedModule() {
         navigationInset: Int
     ): Boolean {
         if (!bottomArea.isShown || bottomArea.height < navigationInset) return false
-        val rootLocation = IntArray(2)
-        val inputLocation = IntArray(2)
-        val bottomLocation = IntArray(2)
-        rootView.getLocationOnScreen(rootLocation)
-        inputFrame.getLocationOnScreen(inputLocation)
-        bottomArea.getLocationOnScreen(bottomLocation)
-        return bottomLocation[1] + bottomArea.height == rootLocation[1] + rootView.height &&
-            inputLocation[1] + inputFrame.height == bottomLocation[1]
+        rootView.getLocationInWindow(imeFrameLocation)
+        val rootBottom = imeFrameLocation[1] + rootView.height
+        inputFrame.getLocationInWindow(imeFrameLocation)
+        val inputBottom = imeFrameLocation[1] + inputFrame.height
+        bottomArea.getLocationInWindow(imeFrameLocation)
+        val bottomTop = imeFrameLocation[1]
+        return bottomTop + bottomArea.height == rootBottom && inputBottom == bottomTop
     }
 
     private fun hookSupportImeList(clazz: Class<*>) {
@@ -663,10 +668,6 @@ class MainHook : XposedModule() {
 
     private fun hookWeTypeCandidatePinyinLeftMargin() {
         WeTypeResourceHooks.hookCandidatePinyinLeftMargin()
-    }
-
-    private fun hookWeTypeWindowCorner() {
-        WeTypeWindowHooks.hookWindowCorner()
     }
 
     private fun hookWeTypeDisableHotUpdate() {
@@ -1167,8 +1168,11 @@ class MainHook : XposedModule() {
     }.getOrDefault(emptyList())
 
     private fun cleanupExternalState(): Boolean = runOnMainThreadBlocking {
-        imeInputFrameLayoutListeners.forEach { (view, listener) ->
-            view.removeOnLayoutChangeListener(listener)
+        imeInputFrameLayoutListeners.forEach { (inputFrame, registration) ->
+            // A pre-attach observer can be merged into the attached window's observer.
+            listOfNotNull(registration.observer.get(), inputFrame.viewTreeObserver)
+                .distinct().filter { it.isAlive }
+                .forEach { it.removeOnGlobalLayoutListener(registration.listener) }
         }
         miuiBottomFrameViews.forEach { (inputFrame, frameViews) ->
             frameViews.first.get()?.let { fullscreenArea ->
@@ -1182,9 +1186,8 @@ class MainHook : XposedModule() {
         }
 
         imeInputFrameLayoutListeners.clear()
-        monitoredImeInputFrames.clear()
         originalImeContentBottomPaddings.clear()
-        originalFullscreenAreaHeights.clear()
+        originalFullscreenAreaLayouts.clear()
         adjustedImeContentViews.clear()
         miuiBottomFrameViews.clear()
         originalAboutLogoStates.clear()

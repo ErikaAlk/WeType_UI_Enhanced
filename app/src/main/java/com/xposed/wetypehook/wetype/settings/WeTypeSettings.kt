@@ -252,7 +252,7 @@ object WeTypeSettings {
         return readSnapshotXposed()
     }
 
-    private fun readSnapshotXposed(): Snapshot {
+    internal fun readSnapshotXposed(): Snapshot {
         if (!snapshotDirty.get()) cachedXposedSnapshot?.let { return it }
         return synchronized(settingsLock) {
             val file = hostFile ?: return@synchronized defaultSnapshot()
