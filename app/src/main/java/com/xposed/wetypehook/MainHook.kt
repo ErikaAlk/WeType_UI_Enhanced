@@ -517,16 +517,21 @@ class MainHook : XposedModule() {
         if (!isCurrentContentAdjusted) {
             adjustedImeContentViews[inputFrame] = WeakReference(contentView)
         }
-        if (!useFlexibleFullscreenSpacer(fullscreenArea)) {
-            restoreMiuiBottomFrame(inputFrame, fullscreenArea)
+        val frameParams = inputFrame.layoutParams as LinearLayout.LayoutParams
+        if (frameParams.height == ViewGroup.LayoutParams.WRAP_CONTENT && frameParams.weight == 0f) {
+            useFlexibleFullscreenSpacer(fullscreenArea)
+        } else {
+            // A full-height input frame owns the remaining space (for example Gboard).
+            // Giving the extraction spacer weight as well would shrink the input frame.
+            restoreFullscreenSpacer(fullscreenArea)
         }
     }
 
-    private fun useFlexibleFullscreenSpacer(fullscreenArea: ViewGroup): Boolean {
+    private fun useFlexibleFullscreenSpacer(fullscreenArea: ViewGroup) {
         // Only the inactive extraction area is a spacer. Visible extraction/candidate
         // content must retain the host's own layout policy.
-        if (fullscreenArea.visibility != View.INVISIBLE) return false
-        val params = fullscreenArea.layoutParams as? LinearLayout.LayoutParams ?: return false
+        if (fullscreenArea.visibility != View.INVISIBLE) return
+        val params = fullscreenArea.layoutParams as? LinearLayout.LayoutParams ?: return
         if (params.height != 0 || params.weight != 1f) {
             originalFullscreenAreaLayouts[fullscreenArea] = FullscreenAreaLayout(params.height, params.weight)
             // Let LinearLayout assign the remaining space on every measurement. Freezing
@@ -535,7 +540,6 @@ class MainHook : XposedModule() {
             params.weight = 1f
             fullscreenArea.layoutParams = params
         }
-        return true
     }
 
     private fun restoreMiuiBottomFrame(inputFrame: ViewGroup, fullscreenArea: ViewGroup) {
@@ -550,6 +554,10 @@ class MainHook : XposedModule() {
                 )
             }
         }
+        restoreFullscreenSpacer(fullscreenArea)
+    }
+
+    private fun restoreFullscreenSpacer(fullscreenArea: ViewGroup) {
         val original = originalFullscreenAreaLayouts.remove(fullscreenArea) ?: return
         val params = fullscreenArea.layoutParams as? LinearLayout.LayoutParams ?: return
         if (params.height == 0 && params.weight == 1f) {
@@ -579,8 +587,12 @@ class MainHook : XposedModule() {
         val contentParams = contentView.layoutParams as? FrameLayout.LayoutParams ?: return false
         val bottomParams = bottomArea.layoutParams as? LinearLayout.LayoutParams ?: return false
         val verticalGravity = contentParams.gravity and Gravity.VERTICAL_GRAVITY_MASK
-        return frameParams.height == ViewGroup.LayoutParams.WRAP_CONTENT && frameParams.weight == 0f &&
-            contentParams.height == ViewGroup.LayoutParams.WRAP_CONTENT &&
+        val wrapsContent = frameParams.height == ViewGroup.LayoutParams.WRAP_CONTENT && frameParams.weight == 0f
+        val fillsAvailableSpace = frameParams.height == 0 && frameParams.weight > 0f ||
+            frameParams.height == ViewGroup.LayoutParams.MATCH_PARENT && frameParams.weight == 0f
+        return (wrapsContent || fillsAvailableSpace) &&
+            (contentParams.height == ViewGroup.LayoutParams.WRAP_CONTENT ||
+                contentParams.height == ViewGroup.LayoutParams.MATCH_PARENT) &&
             contentParams.topMargin == 0 && contentParams.bottomMargin == 0 &&
             (contentParams.gravity == -1 || verticalGravity == Gravity.TOP || verticalGravity == 0) &&
             bottomParams.height != 0 && bottomParams.weight == 0f
