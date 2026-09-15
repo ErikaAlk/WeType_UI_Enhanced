@@ -98,4 +98,8 @@
     <string name="activation_active_title">模块已启用</string>
     <string name="activation_active_summary">点击下方按钮进入寄生的 WeType 设置页</string>
     <string name="activation_open_embedded_settings">进入寄生的 WeType 设置页</string>
+    <string name="settings_hyper_material_title">使用 HyperOS 4 的键盘高级材质</string>
+    <string name="settings_hyper_material_desc">使用与超级小爱输入法相同的背景颜色、模糊、阴影与高光，保留背景平滑圆角；原背景颜色、模糊与高光设置暂不生效。</string>
+    <string name="settings_hyper_material_unavailable">当前系统不支持所需材质接口，或未开启系统高级材质 / 灵动视效。</string>
+    <string name="settings_hyper_material_preview">系统材质</string>
 </resources>

@@ -29,6 +29,7 @@ import com.xposed.wetypehook.xposed.hookAfter
 import com.xposed.wetypehook.xposed.hookBefore
 import com.xposed.wetypehook.xposed.invokeMethodAs
 import com.xposed.wetypehook.xposed.loadClassOrNull
+import com.xposed.wetypehook.wetype.graphics.WeTypeHyperMaterial
 import com.xposed.wetypehook.wetype.graphics.WeTypeBloomStrokeDrawable
 import com.xposed.wetypehook.wetype.graphics.WeTypeCornerRadii
 import com.xposed.wetypehook.wetype.graphics.createWeTypeContinuousRoundedPath
@@ -82,7 +83,9 @@ internal object WeTypeWindowHooks {
         val edgeHighlightIntensity: Int,
         val cornerRadii: WeTypeCornerRadii,
         val nightMode: Int,
-        val density: Float
+        val density: Float,
+        val hyperMaterialEnabled: Boolean,
+        val hyperMaterialAvailable: Boolean
     )
 
     private class ContinuousCornerOutline(val cornerRadii: WeTypeCornerRadii) : ViewOutlineProvider() {
@@ -108,6 +111,8 @@ internal object WeTypeWindowHooks {
     private data class WeTypeWindowState(
         var windowVisible: Boolean = false,
         var backgroundCarrier: View? = null,
+        var hyperMaterial: WeTypeHyperMaterial? = null,
+        var stopMaterialObserver: (() -> Unit)? = null,
         var window: WeakReference<Window>? = null,
         var resourceReconcilePending: Boolean = false,
         var backgroundDecorView: WeakReference<View>? = null,
@@ -1015,6 +1020,12 @@ internal object WeTypeWindowHooks {
         val observer = decorView.viewTreeObserver
         if (!observer.isAlive) return
         state.window = WeakReference(window)
+        if (state.stopMaterialObserver == null) {
+            val serviceReference = WeakReference(inputMethodService)
+            state.stopMaterialObserver = WeTypeHyperMaterial.observeAvailability(decorView.context) {
+                serviceReference.get()?.let { scheduleWindowBlur(it) }
+            }
+        }
         val updateAlreadyPending = state.backgroundUpdatePending
         state.backgroundUpdatePending = true
         state.backgroundStyleDirty = state.backgroundStyleDirty || refreshStyle
@@ -1094,6 +1105,8 @@ internal object WeTypeWindowHooks {
         runCatching {
             val state = getWindowState(inputMethodService)
             state.windowVisible = false
+            state.stopMaterialObserver?.invoke()
+            state.stopMaterialObserver = null
             state.computedVisibleImeHeightPx = null
             removeBackgroundListeners(state)
             hideBackgroundCarrier(state)
@@ -1199,7 +1212,9 @@ internal object WeTypeWindowHooks {
             edgeHighlightIntensity = settings.edgeHighlightIntensity,
             cornerRadii = cornerRadii,
             nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK,
-            density = context.resources.displayMetrics.density
+            density = context.resources.displayMetrics.density,
+            hyperMaterialEnabled = settings.hyperMaterialEnabled,
+            hyperMaterialAvailable = WeTypeHyperMaterial.isAvailable(context)
         )
         val viewRoot = if (state.backgroundStyleDirty || carrier.background == null) {
             runCatching { carrier.invokeMethodAs<Any>("getViewRootImpl") }.getOrNull()
@@ -1208,7 +1223,18 @@ internal object WeTypeWindowHooks {
         }
         if (carrier.background == null || state.backgroundStyle != style || state.backgroundViewRoot !== viewRoot) {
             applyContinuousCornerOutline(carrier, cornerRadii)
-            carrier.background = createBackgroundDrawable(carrier, context, style)
+            val material = checkNotNull(state.hyperMaterial)
+            if (style.hyperMaterialEnabled) {
+                // Remove the old blur/bloom drawable before enabling the system material.
+                carrier.background = Color.TRANSPARENT.toDrawable()
+                if (!material.apply(style.nightMode == Configuration.UI_MODE_NIGHT_YES)) {
+                    // An invocation failure keeps the keyboard legible without custom effects.
+                    carrier.background = createTintDrawable(WeTypeHyperMaterial.fallbackColor(style.nightMode == Configuration.UI_MODE_NIGHT_YES), cornerRadii)
+                }
+            } else {
+                material.clear()
+                carrier.background = createBackgroundDrawable(carrier, context, style)
+            }
             state.backgroundStyle = style
             state.backgroundViewRoot = viewRoot
         }
@@ -1223,6 +1249,7 @@ internal object WeTypeWindowHooks {
             carrier.layout(0, bounds.top, decorView.width, bounds.top + backgroundHeight)
             carrier.invalidateOutline()
         }
+        if (style.hyperMaterialEnabled) state.hyperMaterial?.updateGeometry(cornerRadii)
     }
 
     private fun ensureBackgroundCarrier(
@@ -1233,6 +1260,12 @@ internal object WeTypeWindowHooks {
         val existing = state.backgroundCarrier?.takeIf { it.parent === decorGroup }
         if (existing != null) return existing
 
+        state.backgroundCarrier?.let { oldCarrier ->
+            state.hyperMaterial?.clear()
+            (oldCarrier.parent as? ViewGroup)?.removeView(oldCarrier)
+            state.backgroundStyle = null
+            state.backgroundViewRoot = null
+        }
         val carrier = View(context).apply {
             visibility = View.INVISIBLE
             isClickable = false
@@ -1246,6 +1279,7 @@ internal object WeTypeWindowHooks {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0)
         )
         state.backgroundCarrier = carrier
+        state.hyperMaterial = WeTypeHyperMaterial(carrier)
         return carrier
     }
 
@@ -1286,9 +1320,15 @@ internal object WeTypeWindowHooks {
     private fun hideBackgroundCarrier(state: WeTypeWindowState) {
         val carrier = state.backgroundCarrier ?: return
         carrier.visibility = View.INVISIBLE
+        state.hyperMaterial?.clear()
+        state.backgroundStyle = null
     }
 
     private fun removeBackgroundCarrier(state: WeTypeWindowState) {
+        state.stopMaterialObserver?.invoke()
+        state.stopMaterialObserver = null
+        state.hyperMaterial?.clear()
+        state.hyperMaterial = null
         val carrier = state.backgroundCarrier ?: return
         (carrier.parent as? ViewGroup)?.removeView(carrier)
         state.backgroundCarrier = null

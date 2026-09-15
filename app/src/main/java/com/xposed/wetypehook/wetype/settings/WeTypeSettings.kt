@@ -17,6 +17,7 @@ object WeTypeSettings {
     private const val KEY_WRITE_TOKEN = "settings_write_token"
     private const val KEY_LIGHT_COLOR = "light_color"
     private const val KEY_DARK_COLOR = "dark_color"
+    private const val KEY_HYPER_MATERIAL_ENABLED = "hyper_material_enabled"
     private const val KEY_BLUR_RADIUS = "blur_radius"
     private const val KEY_CORNER_RADIUS = "corner_radius"
     private const val KEY_KEY_CORNER_RADIUS = "key_corner_radius"
@@ -35,6 +36,7 @@ object WeTypeSettings {
     private const val KEY_TOOLBAR_ICON_BG_OPACITY = "toolbar_icon_bg_opacity"
     const val DEFAULT_LIGHT_COLOR = 0xBDD4D4D4.toInt()
     const val DEFAULT_DARK_COLOR = 0x40000000
+    const val DEFAULT_HYPER_MATERIAL_ENABLED = false
     const val DEFAULT_BLUR_RADIUS = 60
     const val DEFAULT_CORNER_RADIUS = 28
     const val MAX_CORNER_RADIUS = DEFAULT_CORNER_RADIUS * 2
@@ -77,7 +79,8 @@ object WeTypeSettings {
         val candidatePinyinLeftMarginDp: Int,
         val appearanceColors: Map<String, Int>,
         val toolbarIconBgOpacity: Int,
-        val disableHotUpdate: Boolean
+        val disableHotUpdate: Boolean,
+        val hyperMaterialEnabled: Boolean
     )
 
     fun getLightColor(context: Context): Int = readSnapshot(context).lightColor
@@ -159,6 +162,7 @@ object WeTypeSettings {
         toolbarIconBgOpacity: Int,
         appearanceColors: Map<String, Int>,
         disableHotUpdate: Boolean = DEFAULT_DISABLE_HOT_UPDATE,
+        hyperMaterialEnabled: Boolean = DEFAULT_HYPER_MATERIAL_ENABLED,
         onPersisted: (Boolean) -> Unit = {}
     ): Boolean {
         val snapshot = Snapshot(
@@ -180,7 +184,8 @@ object WeTypeSettings {
             appearanceColors = WeTypeAppearanceColorGroups.groups.associate { group ->
                 group.id to (appearanceColors[group.id] ?: group.defaultColor)
             },
-            disableHotUpdate = disableHotUpdate
+            disableHotUpdate = disableHotUpdate,
+            hyperMaterialEnabled = hyperMaterialEnabled
         )
         val appContext = context.applicationContext ?: context
         if (appContext.packageName != WETYPE_PACKAGE_NAME) {
@@ -291,6 +296,7 @@ object WeTypeSettings {
                 snapshot.candidatePinyinLeftMarginDp
             )
             .putInt(KEY_TOOLBAR_ICON_BG_OPACITY, snapshot.toolbarIconBgOpacity)
+            .putBoolean(KEY_HYPER_MATERIAL_ENABLED, snapshot.hyperMaterialEnabled)
             .putBoolean(KEY_DISABLE_HOT_UPDATE, snapshot.disableHotUpdate)
             .putBoolean(KEY_KEY_OPACITY_MIGRATED, true)
             .remove(KEY_KEY_OPACITY)
@@ -364,6 +370,7 @@ object WeTypeSettings {
                 val color = getInt(key, fallbackColor)
                 group.id to migrateLegacyKeyOpacity(group, color, legacyKeyOpacity)
             },
+            hyperMaterialEnabled = getBoolean(KEY_HYPER_MATERIAL_ENABLED, DEFAULT_HYPER_MATERIAL_ENABLED),
             disableHotUpdate = getBoolean(KEY_DISABLE_HOT_UPDATE, DEFAULT_DISABLE_HOT_UPDATE)
         )
     }
@@ -399,7 +406,8 @@ object WeTypeSettings {
         candidatePinyinLeftMarginDp = DEFAULT_CANDIDATE_PINYIN_LEFT_MARGIN_DP,
         toolbarIconBgOpacity = DEFAULT_TOOLBAR_ICON_BG_OPACITY,
         appearanceColors = WeTypeAppearanceColorGroups.defaultColors(),
-        disableHotUpdate = DEFAULT_DISABLE_HOT_UPDATE
+        disableHotUpdate = DEFAULT_DISABLE_HOT_UPDATE,
+        hyperMaterialEnabled = DEFAULT_HYPER_MATERIAL_ENABLED
     )
 
 }

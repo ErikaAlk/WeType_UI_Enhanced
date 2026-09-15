@@ -9,8 +9,12 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Outline
 import android.net.Uri
 import android.os.Bundle
+import android.view.View
+import android.view.ViewOutlineProvider
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -51,6 +55,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
@@ -69,8 +74,10 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import com.kyant.capsule.ContinuousRoundedRectangle
+import com.xposed.wetypehook.wetype.graphics.WeTypeHyperMaterial
 import com.xposed.wetypehook.wetype.graphics.WeTypeBloomStrokeDrawable
 import com.xposed.wetypehook.wetype.graphics.WeTypeCornerRadii
 import com.xposed.wetypehook.wetype.graphics.createWeTypeContinuousRoundedPath
@@ -417,6 +424,16 @@ private fun WeTypeSettingsScreen(
 
     var lightColor by rememberSaveable { mutableIntStateOf(snapshot.lightColor) }
     var darkColor by rememberSaveable { mutableIntStateOf(snapshot.darkColor) }
+    var hyperMaterialEnabled by rememberSaveable { mutableStateOf(snapshot.hyperMaterialEnabled) }
+    var hyperMaterialAvailable by remember(preferencesContext) {
+        mutableStateOf(WeTypeHyperMaterial.isAvailable(preferencesContext))
+    }
+    DisposableEffect(preferencesContext) {
+        val stopObserving = WeTypeHyperMaterial.observeAvailability(preferencesContext) {
+            hyperMaterialAvailable = WeTypeHyperMaterial.isAvailable(preferencesContext)
+        }
+        onDispose { stopObserving() }
+    }
     var blurRadius by rememberSaveable { mutableIntStateOf(snapshot.blurRadius) }
     var cornerRadius by rememberSaveable { mutableIntStateOf(snapshot.cornerRadius) }
     var keyCornerRadius by rememberSaveable { mutableIntStateOf(snapshot.keyCornerRadius) }
@@ -510,6 +527,7 @@ private fun WeTypeSettingsScreen(
             toolbarIconBgOpacity = toolbarIconBgOpacity,
             appearanceColors = currentAppearanceColors(),
             disableHotUpdate = disableHotUpdate,
+            hyperMaterialEnabled = hyperMaterialEnabled,
             onPersisted = { saved ->
                 Toast.makeText(
                     context,
@@ -523,6 +541,7 @@ private fun WeTypeSettingsScreen(
     fun restoreDefaults() {
         lightColor = WeTypeSettings.DEFAULT_LIGHT_COLOR
         darkColor = WeTypeSettings.DEFAULT_DARK_COLOR
+        hyperMaterialEnabled = WeTypeSettings.DEFAULT_HYPER_MATERIAL_ENABLED
         blurRadius = WeTypeSettings.DEFAULT_BLUR_RADIUS
         cornerRadius = WeTypeSettings.DEFAULT_CORNER_RADIUS
         keyCornerRadius = WeTypeSettings.DEFAULT_KEY_CORNER_RADIUS
@@ -585,6 +604,7 @@ private fun WeTypeSettingsScreen(
                 },
                 bottomContent = {
                     PreviewSection(
+                        hyperMaterialEnabled = hyperMaterialEnabled,
                         color = previewColor,
                         blurRadius = blurRadius,
                         cornerRadius = cornerRadius,
@@ -739,6 +759,18 @@ private fun WeTypeSettingsScreen(
                 ) {
                     Column {
                         MiuixSwitchWidget(
+                            title = stringResource(R.string.settings_hyper_material_title),
+                            description = stringResource(
+                                if (hyperMaterialAvailable) R.string.settings_hyper_material_desc
+                                else R.string.settings_hyper_material_unavailable
+                            ),
+                            checked = hyperMaterialEnabled,
+                            enabled = hyperMaterialAvailable,
+                            onCheckedChange = { hyperMaterialEnabled = it }
+                        )
+                        HorizontalDivider()
+                        MiuixSwitchWidget(
+                            enabled = !hyperMaterialEnabled,
                             title = stringResource(R.string.settings_edge_highlight_title),
                             description = stringResource(R.string.settings_edge_highlight_desc),
                             checked = edgeHighlightEnabled,
@@ -748,6 +780,7 @@ private fun WeTypeSettingsScreen(
                         if (edgeHighlightEnabled) {
                             SliderPreferenceItem(
                                 title = stringResource(R.string.settings_edge_highlight_intensity_title),
+                                enabled = !hyperMaterialEnabled,
                                 value = edgeHighlightIntensity,
                                 max = 200,
                                 onValueChange = { edgeHighlightIntensity = it }
@@ -759,6 +792,7 @@ private fun WeTypeSettingsScreen(
                         // 模糊滑块
                         SliderPreferenceItem(
                             title = stringResource(R.string.settings_blur_title),
+                            enabled = !hyperMaterialEnabled,
                             value = blurRadius,
                             max = 100,
                             onValueChange = { blurRadius = it }
@@ -930,6 +964,7 @@ private fun ModuleActivationTag(
 
 @Composable
 private fun PreviewSection(
+    hyperMaterialEnabled: Boolean,
     color: Int,
     blurRadius: Int,
     cornerRadius: Int,
@@ -964,6 +999,7 @@ private fun PreviewSection(
                 )
                 Column {
                     PreviewCard(
+                        hyperMaterialEnabled = hyperMaterialEnabled,
                         color = color,
                         blurRadius = blurRadius,
                         cornerRadius = cornerRadius,
@@ -982,6 +1018,7 @@ private fun PreviewSection(
 
 @Composable
 private fun PreviewCard(
+    hyperMaterialEnabled: Boolean,
     color: Int,
     blurRadius: Int,
     cornerRadius: Int,
@@ -993,6 +1030,7 @@ private fun PreviewCard(
     isDark: Boolean
 ) {
     val context = LocalContext.current
+    val displayColor = if (hyperMaterialEnabled) WeTypeHyperMaterial.fallbackColor(isDark) else color
     val weTypeFontFamily = remember(context) {
         FontFamily(
             Font(
@@ -1028,25 +1066,33 @@ private fun PreviewCard(
                     .weTypePreviewBloom(
                         color = color,
                         cornerRadius = previewCorner,
-                        edgeHighlightEnabled = edgeHighlightEnabled,
+                        edgeHighlightEnabled = edgeHighlightEnabled && !hyperMaterialEnabled,
                         edgeHighlightIntensity = edgeHighlightIntensity,
                         isDark = isDark
                     )
                     .clip(previewShape)
             ) {
-                Image(
-                    painter = painterResource(R.drawable.natural_texture_004),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .matchParentSize()
-                        .blur((blurRadius / 3f).coerceAtLeast(0f).dp)
-                )
-                Box(
-                    modifier = Modifier
-                        .matchParentSize()
-                        .background(ComposeColor(color))
-                )
+                if (hyperMaterialEnabled) {
+                    HyperMaterialPreview(
+                        isDark = isDark,
+                        cornerRadius = cornerRadius,
+                        modifier = Modifier.matchParentSize()
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(R.drawable.natural_texture_004),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .blur((blurRadius / 3f).coerceAtLeast(0f).dp)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(ComposeColor(color))
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1056,7 +1102,7 @@ private fun PreviewCard(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (isDark) stringResource(R.string.settings_preview_mode_dark) else stringResource(R.string.settings_preview_mode_light),
-                            color = previewTextColor(color).copy(alpha = 0.7f),
+                            color = previewTextColor(displayColor).copy(alpha = 0.7f),
                             style = MiuixTheme.textStyles.body2
                         )
                         Spacer(modifier = Modifier.height(4.dp))
@@ -1070,8 +1116,8 @@ private fun PreviewCard(
                                     .padding(horizontal = 14.dp, vertical = 8.dp)
                             ) {
                                 Text(
-                                    text = formatArgb(color),
-                                    color = previewTextColor(color),
+                                    text = if (hyperMaterialEnabled) stringResource(R.string.settings_hyper_material_preview) else formatArgb(color),
+                                    color = previewTextColor(displayColor),
                                     style = MiuixTheme.textStyles.headline1,
                                     fontFamily = weTypeFontFamily
                                 )
@@ -1086,7 +1132,7 @@ private fun PreviewCard(
                                 ) {
                                     Text(
                                         text = i.toString(),
-                                        color = previewTextColor(color),
+                                        color = previewTextColor(displayColor),
                                         style = MiuixTheme.textStyles.headline1,
                                         fontFamily = weTypeFontFamily
                                     )
@@ -1095,14 +1141,81 @@ private fun PreviewCard(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "${stringResource(R.string.settings_blur_label)} $blurRadius · ${stringResource(R.string.settings_corner_label)} $cornerRadius",
-                            color = previewTextColor(color).copy(alpha = 0.7f),
+                            text = if (hyperMaterialEnabled) {
+                                "${stringResource(R.string.settings_corner_label)} $cornerRadius"
+                            } else {
+                                "${stringResource(R.string.settings_blur_label)} $blurRadius · ${stringResource(R.string.settings_corner_label)} $cornerRadius"
+                            },
+                            color = previewTextColor(displayColor).copy(alpha = 0.7f),
                             style = MiuixTheme.textStyles.body2
                         )
                     }
                 }
             }
         }
+    }
+}
+
+
+@Composable
+private fun HyperMaterialPreview(isDark: Boolean, cornerRadius: Int, modifier: Modifier) {
+    AndroidView(
+        modifier = modifier,
+        factory = { context -> HyperMaterialPreviewLayout(context) },
+        update = { it.updateStyle(isDark, cornerRadius) },
+        onRelease = { it.releaseMaterial() }
+    )
+}
+
+private class HyperMaterialPreviewLayout(context: Context) : FrameLayout(context) {
+    private val panel = View(context)
+    private val material = WeTypeHyperMaterial(panel)
+    private var isDark = false
+    private var cornerRadius = 0
+
+    init {
+        clipChildren = false
+        clipToPadding = false
+        addView(panel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+    }
+
+    fun updateStyle(isDark: Boolean, cornerRadius: Int) {
+        this.isDark = isDark
+        this.cornerRadius = cornerRadius
+        renderMaterial()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        renderMaterial()
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        // The expanded effect sibling must never determine this preview's size.
+        panel.layout(0, 0, width, height)
+        renderMaterial()
+    }
+
+    private fun renderMaterial() {
+        if (!isAttachedToWindow || width <= 0 || height <= 0) return
+        val radius = cornerRadius * resources.displayMetrics.density
+        val radii = WeTypeCornerRadii(radius, radius, 0f, 0f)
+        panel.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                outline.setPath(createWeTypeContinuousRoundedPath(view.width.toFloat(), view.height.toFloat(), radii))
+            }
+        }
+        panel.clipToOutline = true
+        panel.invalidateOutline()
+        if (material.apply(isDark)) material.updateGeometry(radii)
+        else panel.setBackgroundColor(WeTypeHyperMaterial.fallbackColor(isDark))
+    }
+
+    fun releaseMaterial() = material.clear()
+
+    override fun onDetachedFromWindow() {
+        material.clear()
+        super.onDetachedFromWindow()
     }
 }
 
@@ -1345,11 +1458,13 @@ private fun SliderPreferenceItem(
     title: String,
     value: Int,
     max: Int,
+    enabled: Boolean = true,
     onValueChange: (Int) -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .alpha(if (enabled) 1f else 0.38f)
             .padding(16.dp)
     ) {
         Row(
@@ -1369,6 +1484,7 @@ private fun SliderPreferenceItem(
         }
         Spacer(modifier = Modifier.height(8.dp))
         Slider(
+            enabled = enabled,
             value = value.toFloat(),
             onValueChange = { onValueChange(it.roundToInt()) },
             valueRange = 0f..max.toFloat(),
@@ -1382,18 +1498,22 @@ private fun MiuixSwitchWidget(
     title: String,
     description: String? = null,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
     val toggleAction = {
-        onCheckedChange(!checked)
+        if (enabled) onCheckedChange(!checked)
     }
 
     BasicComponent(
         title = title,
+        modifier = Modifier.alpha(if (enabled) 1f else 0.38f),
+        enabled = enabled,
         summary = description,
         onClick = toggleAction,
         endActions = {
             Switch(
+                enabled = enabled,
                 checked = checked,
                 onCheckedChange = onCheckedChange
             )
