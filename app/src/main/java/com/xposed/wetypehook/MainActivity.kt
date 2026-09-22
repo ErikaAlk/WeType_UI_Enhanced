@@ -85,6 +85,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import com.kyant.capsule.ContinuousRoundedRectangle
+import com.xposed.wetypehook.coloros.ColorOsBackdropColor
 import com.xposed.wetypehook.wetype.graphics.WeTypeHyperMaterial
 import com.xposed.wetypehook.wetype.graphics.WeTypeBloomStrokeDrawable
 import com.xposed.wetypehook.wetype.graphics.WeTypeCornerRadii
@@ -459,6 +460,8 @@ private fun WeTypeSettingsScreen(
         }
         onDispose { stopObserving() }
     }
+    var immersiveBackgroundEnabled by rememberSaveable { mutableStateOf(snapshot.immersiveBackgroundEnabled) }
+    val immersiveBackgroundAvailable = remember { ColorOsBackdropColor.isSupported }
     var blurRadius by rememberSaveable { mutableIntStateOf(snapshot.blurRadius) }
     var cornerRadius by rememberSaveable { mutableIntStateOf(snapshot.cornerRadius) }
     var keyCornerRadius by rememberSaveable { mutableIntStateOf(snapshot.keyCornerRadius) }
@@ -561,6 +564,7 @@ private fun WeTypeSettingsScreen(
             disableHotUpdate = disableHotUpdate,
             hyperMaterialEnabled = hyperMaterialEnabled,
             glassOverrides = glassOverridesToSave,
+            immersiveBackgroundEnabled = immersiveBackgroundEnabled,
             onPersisted = { saved ->
                 Toast.makeText(
                     context,
@@ -577,6 +581,7 @@ private fun WeTypeSettingsScreen(
         glassInput.indices.forEach { glassInput[it] = "" }
         previewGlassOverrides = GlassMaterialOverrides()
         hyperMaterialEnabled = WeTypeSettings.DEFAULT_HYPER_MATERIAL_ENABLED
+        immersiveBackgroundEnabled = WeTypeSettings.DEFAULT_IMMERSIVE_BACKGROUND_ENABLED
         blurRadius = WeTypeSettings.DEFAULT_BLUR_RADIUS
         cornerRadius = WeTypeSettings.DEFAULT_CORNER_RADIUS
         keyCornerRadius = WeTypeSettings.DEFAULT_KEY_CORNER_RADIUS
@@ -816,6 +821,17 @@ private fun WeTypeSettingsScreen(
                                 }
                             )
                         }
+                        HorizontalDivider()
+                        MiuixSwitchWidget(
+                            title = stringResource(R.string.settings_immersive_background_title),
+                            description = stringResource(
+                                if (immersiveBackgroundAvailable) R.string.settings_immersive_background_desc
+                                else R.string.settings_immersive_background_unavailable
+                            ),
+                            checked = immersiveBackgroundEnabled,
+                            enabled = immersiveBackgroundAvailable,
+                            onCheckedChange = { immersiveBackgroundEnabled = it }
+                        )
                         HorizontalDivider()
                         MiuixSwitchWidget(
                             enabled = !hyperMaterialEnabled,
