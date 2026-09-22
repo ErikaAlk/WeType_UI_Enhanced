@@ -18,6 +18,7 @@ object WeTypeSettings {
     private const val KEY_LIGHT_COLOR = "light_color"
     private const val KEY_DARK_COLOR = "dark_color"
     private const val KEY_HYPER_MATERIAL_ENABLED = "hyper_material_enabled"
+    private const val KEY_IMMERSIVE_BACKGROUND_ENABLED = "immersive_background_enabled"
     private const val KEY_BLUR_RADIUS = "blur_radius"
     private const val KEY_CORNER_RADIUS = "corner_radius"
     private const val KEY_KEY_CORNER_RADIUS = "key_corner_radius"
@@ -37,6 +38,7 @@ object WeTypeSettings {
     const val DEFAULT_LIGHT_COLOR = 0xBDD4D4D4.toInt()
     const val DEFAULT_DARK_COLOR = 0x40000000
     const val DEFAULT_HYPER_MATERIAL_ENABLED = false
+    const val DEFAULT_IMMERSIVE_BACKGROUND_ENABLED = false
     const val DEFAULT_BLUR_RADIUS = 60
     const val DEFAULT_CORNER_RADIUS = 28
     const val MAX_CORNER_RADIUS = DEFAULT_CORNER_RADIUS * 2
@@ -81,7 +83,8 @@ object WeTypeSettings {
         val toolbarIconBgOpacity: Int,
         val disableHotUpdate: Boolean,
         val hyperMaterialEnabled: Boolean,
-        val glassOverrides: GlassMaterialOverrides = GlassMaterialOverrides()
+        val glassOverrides: GlassMaterialOverrides = GlassMaterialOverrides(),
+        val immersiveBackgroundEnabled: Boolean = DEFAULT_IMMERSIVE_BACKGROUND_ENABLED
     )
 
     fun getLightColor(context: Context): Int = readSnapshot(context).lightColor
@@ -165,6 +168,7 @@ object WeTypeSettings {
         disableHotUpdate: Boolean = DEFAULT_DISABLE_HOT_UPDATE,
         hyperMaterialEnabled: Boolean = DEFAULT_HYPER_MATERIAL_ENABLED,
         glassOverrides: GlassMaterialOverrides = GlassMaterialOverrides(),
+        immersiveBackgroundEnabled: Boolean = DEFAULT_IMMERSIVE_BACKGROUND_ENABLED,
         onPersisted: (Boolean) -> Unit = {}
     ): Boolean {
         val snapshot = Snapshot(
@@ -188,7 +192,8 @@ object WeTypeSettings {
             },
             disableHotUpdate = disableHotUpdate,
             hyperMaterialEnabled = hyperMaterialEnabled,
-            glassOverrides = glassOverrides
+            glassOverrides = glassOverrides,
+            immersiveBackgroundEnabled = immersiveBackgroundEnabled
         )
         val appContext = context.applicationContext ?: context
         if (appContext.packageName != WETYPE_PACKAGE_NAME) {
@@ -300,6 +305,7 @@ object WeTypeSettings {
             )
             .putInt(KEY_TOOLBAR_ICON_BG_OPACITY, snapshot.toolbarIconBgOpacity)
             .putBoolean(KEY_HYPER_MATERIAL_ENABLED, snapshot.hyperMaterialEnabled)
+            .putBoolean(KEY_IMMERSIVE_BACKGROUND_ENABLED, snapshot.immersiveBackgroundEnabled)
             .putBoolean(KEY_DISABLE_HOT_UPDATE, snapshot.disableHotUpdate)
             .putBoolean(KEY_KEY_OPACITY_MIGRATED, true)
             .remove(KEY_KEY_OPACITY)
@@ -390,6 +396,10 @@ object WeTypeSettings {
             },
             hyperMaterialEnabled = getBoolean(KEY_HYPER_MATERIAL_ENABLED, DEFAULT_HYPER_MATERIAL_ENABLED),
             glassOverrides = GlassMaterialOverrides.read(this),
+            immersiveBackgroundEnabled = getBoolean(
+                KEY_IMMERSIVE_BACKGROUND_ENABLED,
+                DEFAULT_IMMERSIVE_BACKGROUND_ENABLED
+            ),
             disableHotUpdate = getBoolean(KEY_DISABLE_HOT_UPDATE, DEFAULT_DISABLE_HOT_UPDATE)
         )
     }

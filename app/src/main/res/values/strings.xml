@@ -102,6 +102,9 @@
     <string name="settings_hyper_material_desc">Use the same tint, blur, shadow and highlights as XiaoAI IME. Keeps custom background corners; overrides background color, blur and highlight settings.</string>
     <string name="settings_hyper_material_unavailable">Requires supported system material APIs and system advanced visual effects to be enabled.</string>
     <string name="settings_hyper_material_preview">Material</string>
+    <string name="settings_immersive_background_title">Immersive keyboard background</string>
+    <string name="settings_immersive_background_desc">When the keyboard sits right under an app bar, fill the area behind the keyboard with the color of the bar, so its corners and top edge show no other color. Requires System UI in the LSPosed scope.</string>
+    <string name="settings_immersive_background_unavailable">Requires ColorOS 14 or later.</string>
     <string name="settings_glass_params">Glass effect parameters</string>
     <string name="settings_glass_params_desc">42 finite numbers, separated by commas; keeps the native parameter order and units.</string>
     <string name="settings_glass_blur">Glass blur radii</string>

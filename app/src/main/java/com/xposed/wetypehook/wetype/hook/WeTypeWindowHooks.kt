@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Path
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
@@ -21,6 +22,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import androidx.core.graphics.drawable.toDrawable
+import com.xposed.wetypehook.coloros.ColorOsBackdropColor
 import com.xposed.wetypehook.xposed.Log
 import com.xposed.wetypehook.xposed.HookEnvironment
 import com.xposed.wetypehook.xposed.findMethodInHierarchy
@@ -112,6 +114,7 @@ internal object WeTypeWindowHooks {
     private data class WeTypeWindowState(
         var windowVisible: Boolean = false,
         var backgroundCarrier: View? = null,
+        var immersiveBackdrop: View? = null,
         var carrierOverrides: GlassMaterialOverrides = GlassMaterialOverrides(),
         var hyperMaterial: WeTypeHyperMaterial? = null,
         var stopMaterialObserver: (() -> Unit)? = null,
@@ -1064,7 +1067,9 @@ internal object WeTypeWindowHooks {
                         hideBackgroundCarrier(state)
                         return@runCatching true
                     }
-                    applyBackgroundCarrier(window, latestDecorView, context, state, bounds)
+                    applyBackgroundCarrier(window, latestDecorView, context, state, bounds) {
+                        serviceReference.get()?.let { scheduleWindowBlur(it) }
+                    }
                     true
                 }.getOrElse {
                     Log.i("Failed: Apply WeType background before drawing")
@@ -1112,6 +1117,7 @@ internal object WeTypeWindowHooks {
             state.computedVisibleImeHeightPx = null
             removeBackgroundListeners(state)
             hideBackgroundCarrier(state)
+            ColorOsBackdropColor.stop()
             if (removeCarrier) {
                 removeBackgroundCarrier(state)
                 synchronized(weTypeWindowStates) {
@@ -1178,7 +1184,8 @@ internal object WeTypeWindowHooks {
         decorView: View,
         context: Context,
         state: WeTypeWindowState,
-        bounds: WeTypeBackgroundBounds
+        bounds: WeTypeBackgroundBounds,
+        onImmersiveColorChanged: () -> Unit
     ) {
         val decorGroup = decorView as? ViewGroup ?: return
         val backgroundHeight = bounds.height
@@ -1209,10 +1216,19 @@ internal object WeTypeWindowHooks {
         } else GlassMaterialOverrides()
         val carrier = ensureBackgroundCarrier(context, decorGroup, state, overrides)
         carrier.visibility = View.VISIBLE
+        val immersiveColor = if (settings.immersiveBackgroundEnabled) {
+            decorView.getLocationOnScreen(state.locationBuffer)
+            ColorOsBackdropColor.track(decorView, state.locationBuffer[1] + bounds.top, onImmersiveColorChanged)
+        } else {
+            ColorOsBackdropColor.stop()
+            null
+        }
         val style = BackgroundStyle(
             color = if (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
                 Configuration.UI_MODE_NIGHT_YES) settings.darkColor else settings.lightColor,
-            blurRadius = settings.blurRadius,
+            // With the window blur on, ColorOS shows the app under the keyboard through the glass
+            // instead of the backdrop; an opaque backdrop leaves nothing to blur anyway.
+            blurRadius = if (immersiveColor != null) 0 else settings.blurRadius,
             edgeHighlightEnabled = settings.edgeHighlightEnabled,
             edgeHighlightIntensity = settings.edgeHighlightIntensity,
             cornerRadii = cornerRadii,
@@ -1255,6 +1271,7 @@ internal object WeTypeWindowHooks {
             carrier.invalidateOutline()
         }
         if (style.hyperMaterialEnabled) state.hyperMaterial?.updateGeometry(cornerRadii)
+        syncImmersiveBackdrop(context, decorGroup, carrier, state, immersiveColor, bounds.top, backgroundHeight)
     }
 
     private fun ensureBackgroundCarrier(
@@ -1325,7 +1342,46 @@ internal object WeTypeWindowHooks {
                 .takeIf { it != 0 }
         }.toIntArray()
 
+    /**
+     * Puts the app bar color behind the keyboard, so its rounded corners and translucent glass show
+     * the bar instead of whatever the app has under the keyboard (QQ keeps a darker panel there).
+     * Same zero-height layout trick as the carrier; it must stay below the carrier.
+     */
+    private fun syncImmersiveBackdrop(
+        context: Context,
+        decorGroup: ViewGroup,
+        carrier: View,
+        state: WeTypeWindowState,
+        color: Int?,
+        top: Int,
+        height: Int
+    ) {
+        if (color == null) {
+            state.immersiveBackdrop?.visibility = View.INVISIBLE
+            return
+        }
+        val backdrop = state.immersiveBackdrop ?: View(context).apply {
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }.also { state.immersiveBackdrop = it }
+        if (backdrop.parent !== decorGroup || decorGroup.indexOfChild(backdrop) > decorGroup.indexOfChild(carrier)) {
+            (backdrop.parent as? ViewGroup)?.removeView(backdrop)
+            decorGroup.addView(backdrop, 0, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
+        }
+        backdrop.visibility = View.VISIBLE
+        if ((backdrop.background as? ColorDrawable)?.color != color) backdrop.background = ColorDrawable(color)
+        if (backdrop.width != decorGroup.width || backdrop.height != height || backdrop.top != top) {
+            backdrop.measure(
+                View.MeasureSpec.makeMeasureSpec(decorGroup.width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+            )
+            backdrop.layout(0, top, decorGroup.width, top + height)
+        }
+    }
+
     private fun hideBackgroundCarrier(state: WeTypeWindowState) {
+        state.immersiveBackdrop?.visibility = View.INVISIBLE
         val carrier = state.backgroundCarrier ?: return
         carrier.visibility = View.INVISIBLE
         state.hyperMaterial?.clear()
@@ -1333,6 +1389,8 @@ internal object WeTypeWindowHooks {
     }
 
     private fun removeBackgroundCarrier(state: WeTypeWindowState) {
+        state.immersiveBackdrop?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        state.immersiveBackdrop = null
         state.stopMaterialObserver?.invoke()
         state.stopMaterialObserver = null
         state.hyperMaterial?.clear()
@@ -1360,7 +1418,7 @@ internal object WeTypeWindowHooks {
     private fun createBackgroundDrawable(targetView: View, context: Context, style: BackgroundStyle): Drawable {
         val (color, blurRadius, edgeHighlightEnabled, edgeHighlightIntensity, cornerRadii) = style
         val tintDrawable = createTintDrawable(color, cornerRadii)
-        val blurDrawable = createInternalBackgroundBlurDrawable(targetView, blurRadius, cornerRadii)
+        val blurDrawable = if (blurRadius > 0) createInternalBackgroundBlurDrawable(targetView, blurRadius, cornerRadii) else null
         val layers = buildList {
             blurDrawable?.also(::add)
             add(tintDrawable)

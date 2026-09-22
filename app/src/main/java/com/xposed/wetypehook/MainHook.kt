@@ -21,6 +21,7 @@ import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import com.xposed.wetypehook.coloros.ColorOsBackdropColor
 import com.xposed.wetypehook.wetype.hook.WeTypeResourceHooks
 import com.xposed.wetypehook.wetype.hook.WeTypeUpdateHooks
 import com.xposed.wetypehook.wetype.hook.WeTypeWindowHooks
@@ -60,6 +61,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "miuiime"
 private const val WETYPE_PACKAGE = "com.tencent.wetype"
+private const val SYSTEMUI_PACKAGE = "com.android.systemui"
 private const val MIUI_PHRASE_PACKAGE = "com.miui.phrase"
 private const val MIUI_INPUT_PROVIDER = "com.miui.provider.InputProvider"
 private const val INPUT_METHOD_BOTTOM_MANAGER = "com.miui.inputmethod.InputMethodBottomManager"
@@ -185,6 +187,7 @@ class MainHook : XposedModule() {
         val windowClean = WeTypeWindowHooks.prepareForHotReload()
         val resourcesClean = runOnMainThreadBlocking {
             WeTypeResourceHooks.prepareForHotReload()
+            ColorOsBackdropColor.prepareForHotReload()
         }
         val mainClean = cleanupExternalState()
         WeTypeSettings.prepareForHotReload()
@@ -251,6 +254,12 @@ class MainHook : XposedModule() {
         classLoader: ClassLoader,
         isMiuiImeSupport: Boolean
     ) {
+        if (packageName == SYSTEMUI_PACKAGE) {
+            // In scope only to hand the ColorOS BlurService binder to WeType.
+            HookEnvironment.withHookScope("systemui.blur-service-bridge") { ColorOsBackdropColor.installSystemUi() }
+            return
+        }
+
         val isWeType = packageName == WETYPE_PACKAGE
 
         if (isWeType) {
