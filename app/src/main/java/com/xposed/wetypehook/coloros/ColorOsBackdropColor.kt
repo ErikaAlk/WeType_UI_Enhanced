@@ -181,7 +181,6 @@ object ColorOsBackdropColor {
     @Volatile
     private var worker: Handler? = null
 
-    @Volatile
     private var blurService: IBinder? = null
 
     // -1 once stopped, so frames still in flight are dropped.
@@ -191,16 +190,26 @@ object ColorOsBackdropColor {
     @Volatile
     private var lastFrameProcessedAt = 0L
 
-    private class Frame(val buffer: HardwareBuffer, val scale: Float, val rotation: Int)
+    // Bumped by stop(), so a frame already being read cannot color the next keyboard session.
+    @Volatile
+    private var session = 0
+
+    private class Frame(val buffer: HardwareBuffer, val scale: Float, val rotation: Int, val session: Int)
 
     private val pendingFrame = AtomicReference<Frame?>()
 
-    private val deathRecipient = IBinder.DeathRecipient {
-        blurService = null
-        mainHandler.post {
-            registered = false
-            sampledTopPx = -1
-            onColorChanged?.invoke()
+    private val deathRecipient = object : IBinder.DeathRecipient {
+        override fun binderDied() = Unit
+
+        // A late notice for a replaced binder must not drop the new one.
+        override fun binderDied(who: IBinder) {
+            mainHandler.post {
+                if (blurService !== who) return@post
+                blurService = null
+                registered = false
+                sampledTopPx = -1
+                onColorChanged?.invoke()
+            }
         }
     }
 
@@ -256,6 +265,7 @@ object ColorOsBackdropColor {
     fun stop() {
         onColorChanged = null
         color = null
+        session++
         sampleTopPx = -1
         sampledTopPx = -1
         pendingFrame.getAndSet(null)?.buffer?.close()
@@ -289,6 +299,8 @@ object ColorOsBackdropColor {
         blurService = null
         worker?.looper?.quitSafely()
         worker = null
+        // quitSafely drops delayed reads; close what they would have closed.
+        pendingFrame.getAndSet(null)?.buffer?.close()
 
         bridgeContext?.let { context ->
             bridgeRequestReceiver?.let { runCatching { context.unregisterReceiver(it) } }
@@ -355,7 +367,12 @@ object ColorOsBackdropColor {
     // the trailing frame is always read, so the color settles on the final screen.
     private fun onFrame(bundle: Bundle) {
         val buffer = bundle.getParcelable(KEY_BUFFER, HardwareBuffer::class.java) ?: return
-        val frame = Frame(buffer, bundle.getFloat(KEY_SCALE, 0.25f), bundle.getInt(KEY_ROTATION))
+        // Stopped (hidden, or this generation was hot reloaded): nothing may start the worker.
+        if (sampleTopPx < 0) {
+            buffer.close()
+            return
+        }
+        val frame = Frame(buffer, bundle.getFloat(KEY_SCALE, 0.25f), bundle.getInt(KEY_ROTATION), session)
         val replaced = pendingFrame.getAndSet(frame)
         if (replaced != null) {
             replaced.buffer.close()
@@ -372,14 +389,12 @@ object ColorOsBackdropColor {
     private fun processPendingFrame() {
         val frame = pendingFrame.getAndSet(null) ?: return
         lastFrameProcessedAt = SystemClock.uptimeMillis()
-        val top = sampleTopPx
-        // ponytail: portrait only; a rotated capture needs its rows mapped back to the display.
         val sampled = frame.buffer.use { buffer ->
-            if (frame.rotation != 0 || top < 0) null
-            else runCatching { readEdgeColor(buffer, top, frame.scale) }.onFailure(Log::i).getOrNull()
+            val row = edgeRow(sampleTopPx, frame.scale, frame.rotation, buffer.height) ?: return@use null
+            runCatching { readRowColor(buffer, row) }.onFailure(Log::i).getOrNull()
         }
         mainHandler.post {
-            if (sampleTopPx < 0 || isSameColor(sampled, color)) return@post
+            if (frame.session != session || sampleTopPx < 0 || isSameColor(sampled, color)) return@post
             color = sampled
             onColorChanged?.invoke()
         }
@@ -392,9 +407,7 @@ object ColorOsBackdropColor {
         }
     }
 
-    private fun readEdgeColor(buffer: HardwareBuffer, topPx: Int, scale: Float): Int? {
-        val y = (topPx * scale).toInt() - EDGE_ROW_OFFSET
-        if (y < 0 || y >= buffer.height) return null
+    private fun readRowColor(buffer: HardwareBuffer, y: Int): Int? {
         val wrapped = Bitmap.wrapHardwareBuffer(buffer, ColorSpace.get(ColorSpace.Named.SRGB)) ?: return null
         val soft = try {
             wrapped.copy(Bitmap.Config.ARGB_8888, false)
@@ -406,6 +419,16 @@ object ColorOsBackdropColor {
         soft.recycle()
         return uniformEdgeColor(row)
     }
+}
+
+/**
+ * The capture row just above a keyboard whose top is [topPx] on screen, or null when it falls
+ * outside the capture or the capture is rotated.
+ */
+// ponytail: portrait only; a rotated capture needs its rows mapped back to the display.
+internal fun edgeRow(topPx: Int, scale: Float, rotation: Int, height: Int): Int? {
+    if (topPx < 0 || rotation != 0) return null
+    return ((topPx * scale).toInt() - EDGE_ROW_OFFSET).takeIf { it in 0 until height }
 }
 
 /**

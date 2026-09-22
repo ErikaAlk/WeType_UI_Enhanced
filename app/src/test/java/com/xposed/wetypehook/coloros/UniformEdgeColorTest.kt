@@ -37,4 +37,14 @@ class UniformEdgeColorTest {
         assertNull(uniformEdgeColor(row))
         assertNull(uniformEdgeColor(IntArray(0)))
     }
+
+    @Test
+    fun sampledRowSitsJustAboveTheKeyboard() {
+        // PJZ110: keyboard top 2037 px, capture 360x792 at scale 0.25.
+        assertEquals(507, edgeRow(2037, 0.25f, 0, 792))
+        assertNull(edgeRow(4, 0.25f, 0, 792))
+        assertNull(edgeRow(4000, 0.25f, 0, 792))
+        assertNull(edgeRow(2037, 0.25f, 1, 792))
+        assertNull(edgeRow(-1, 0.25f, 0, 792))
+    }
 }
