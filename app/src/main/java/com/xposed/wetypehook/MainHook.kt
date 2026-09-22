@@ -1,6 +1,7 @@
 package com.xposed.wetypehook
 
 import android.app.Activity
+import android.app.Application
 import android.content.Context
 import android.content.res.AssetManager
 import android.content.res.Configuration
@@ -55,6 +56,7 @@ import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "miuiime"
 private const val WETYPE_PACKAGE = "com.tencent.wetype"
@@ -252,7 +254,11 @@ class MainHook : XposedModule() {
         val isWeType = packageName == WETYPE_PACKAGE
 
         if (isWeType) {
-            installWeTypeHooks(packageName)
+            // Framework-only hooks; the Application.attach one must be in place before attach runs.
+            HookEnvironment.withHookScope("wetype.activation") { hookActivationHeartbeat(packageName) }
+            HookEnvironment.withHookScope("wetype.host-classloader") {
+                afterHostClassLoaderReady { installWeTypeHooks() }
+            }
         }
 
         if (!isMiuiImeSupport) return
@@ -280,7 +286,7 @@ class MainHook : XposedModule() {
         Log.i("Hook MIUI IME Done!")
     }
 
-    private fun installWeTypeHooks(sourcePackage: String) {
+    private fun installWeTypeHooks() {
         // Application.attach is not replayed when an already running process hot reloads.
         val application = runCatching {
             Class.forName("android.app.ActivityThread")
@@ -289,7 +295,6 @@ class MainHook : XposedModule() {
         }.getOrNull()
         application?.let(WeTypeSettings::ensureHostSnapshot)
 
-        HookEnvironment.withHookScope("wetype.activation") { hookActivationHeartbeat(sourcePackage) }
         HookEnvironment.withHookScope("wetype.font") { hookWeTypeFont() }
         HookEnvironment.withHookScope("wetype.colors") { hookWeTypeTransparentColors() }
         HookEnvironment.withHookScope("wetype.overlay-underlay") { WeTypeWindowHooks.hookTransparentOverlayUnderlay() }
@@ -1069,14 +1074,37 @@ class MainHook : XposedModule() {
         return ClassLoader.getSystemClassLoader()
     }
 
+    // The context's loader, not the Application class's: RFix/Tinker load the Application class
+    // before swapping in the patch loader that every later host class comes from.
     private fun currentApplicationClassLoader(): ClassLoader? = runCatching {
-        Class.forName("android.app.ActivityThread")
+        (Class.forName("android.app.ActivityThread")
             .getDeclaredMethod("currentApplication")
             .apply { isAccessible = true }
-            .invoke(null)
-            ?.javaClass
+            .invoke(null) as? Context)
             ?.classLoader
     }.getOrNull()
+
+    /**
+     * RFix/Tinker replace the app ClassLoader inside Application.attach, so host classes resolved
+     * from the loader handed to onPackageReady are not the ones a patched host runs.
+     */
+    private fun afterHostClassLoaderReady(block: () -> Unit) {
+        // Hot reload: onHotReloaded has already switched to the running application's loader.
+        if (currentApplicationClassLoader() != null) {
+            block()
+            return
+        }
+        val done = AtomicBoolean(false)
+        findMethod("android.app.Application") {
+            name == "attach" && parameterTypes.sameAs(Context::class.java)
+        }.hookAfter { param ->
+            val application = param.thisObject as? Application ?: return@hookAfter
+            if (!done.compareAndSet(false, true)) return@hookAfter
+            HookEnvironment.updateClassLoader(application.classLoader)
+            Log.i("Install host hooks with ${application.classLoader.javaClass.name}")
+            block()
+        }
+    }
 
     private fun reinstallDynamicBottomManagerHooks(
         oldHookHandles: List<XposedInterface.HookHandle>,
